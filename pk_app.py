@@ -288,6 +288,10 @@ mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation"
 eval_type = st.sidebar.radio("Evaluation Context", ["Preclinical (TK/Linearity)", "Clinical (Variability/Accumulation)"])
 route = st.sidebar.radio("Route", ["IV", "Oral"])
 
+tau = 24.0 # Default
+if eval_type == "Clinical (Variability/Accumulation)":
+    tau = st.sidebar.number_input("Dosing Interval (Tau, hr)", value=24.0, help="축적성(Rac) 및 Steady-state 계산을 위한 투여 간격")
+
 if mode == "NCA & Fitting":
     st.sidebar.subheader("Data Input")
     input_method = st.sidebar.radio("Input Method", ["Manual Entry", "Upload CSV"])
@@ -358,7 +362,7 @@ if mode == "NCA & Fitting":
         d_val = sub_data['Dose'].iloc[0] if 'Dose' in sub_data.columns else 100
         sex_val = sub_data['Sex'].iloc[0] if 'Sex' in sub_data.columns else 'N/A'
         res = calculate_single_nca(sub_data['Time'].values, sub_data['Concentration'].values, dose=d_val, route=route)
-        res.update({'Group': g, 'Subject': sub, 'Sex': sex_val})
+        res.update({'Group': g, 'Subject': sub, 'Sex': sex_val, 'Dose': d_val})
         all_nca.append(res)
     
     nca_df = pd.DataFrame(all_nca)
@@ -385,22 +389,47 @@ if mode == "NCA & Fitting":
             st.info("Need at least 2 unique doses for dose proportionality analysis.")
     else: # Clinical (Variability/Accumulation)
         st.subheader("🏥 Clinical Evaluation (Variability & Steady-state)")
-        # CV% calculation for subjects within same group
-        # Ensure 'Cl' and 'Vz' are present and handle oral vs IV specific parameters
-        if route == 'IV':
-            params_to_check = ['Cmax', 'AUC_last', 'Cl', 'Vz']
-        else: # Oral
-            params_to_check = ['Cmax', 'AUC_last', 'Cl_F', 'Vz_F']
         
-        # Filter for parameters that are not all NaN
-        available_params = [p for p in params_to_check if not nca_df[p].isnull().all()]
+        # 1. Inter-subject Variability (CV%)
+        if route == 'IV': params_to_check = ['Cmax', 'AUC_last', 'Cl', 'Vz']
+        else: params_to_check = ['Cmax', 'AUC_last', 'Cl_F', 'Vz_F']
+        available_params = [p for p in params_to_check if p in nca_df.columns and not nca_df[p].isnull().all()]
 
         if available_params:
             group_cv = nca_df.groupby('Group')[available_params].agg(lambda x: (np.std(x)/np.mean(x)*100) if np.mean(x)!=0 else np.nan)
             st.write("**Inter-subject Variability (CV%)**")
             st.dataframe(group_cv.style.format("{:.1f}%"))
-        else:
-            st.info("No valid parameters to calculate inter-subject variability.")
+
+        # 2. Steady-state & Accumulation (Estimation)
+        st.write(f"**Steady-state & Accumulation Metrics (Estimated for Tau={tau}h)**")
+        acc_results = []
+        for g, g_df in nca_df.groupby('Group'):
+            lz = g_df['Lambda_z'].mean()
+            auc_inf = g_df['AUC_inf'].mean()
+            if lz > 0:
+                rac = 1 / (1 - np.exp(-lz * tau))
+                cavg_ss = auc_inf / tau
+                acc_results.append({'Group': g, 'Rac (Accumulation)': rac, 'Cavg,ss (ng/mL)': cavg_ss})
+        if acc_results:
+            st.dataframe(pd.DataFrame(acc_results).set_index('Group').style.format(precision=2))
+
+        # 3. Bioequivalence-lite (90% Confidence Interval)
+        st.write("**Geometric Mean & 90% Confidence Interval (Log-normal)**")
+        be_results = []
+        for g, g_df in nca_df.groupby('Group'):
+            for p in ['Cmax', 'AUC_last']:
+                vals = g_df[p].values[g_df[p] > 0]
+                if len(vals) >= 2:
+                    log_vals = np.log(vals)
+                    mean_log = np.mean(log_vals)
+                    se_log = np.std(log_vals, ddof=1) / np.sqrt(len(vals))
+                    t_val = 1.645 # Approx for 90% CI for large-ish N (can use scipy.stats.t.ppf if needed)
+                    ci_lower = np.exp(mean_log - t_val * se_log)
+                    ci_upper = np.exp(mean_log + t_val * se_log)
+                    geo_mean = np.exp(mean_log)
+                    be_results.append({'Group': g, 'Parameter': p, 'GeoMean': geo_mean, '90% CI Lower': ci_lower, '90% CI Upper': ci_upper})
+        if be_results:
+            st.table(pd.DataFrame(be_results).set_index(['Group', 'Parameter']))
 
     # Reorder columns for better view
     if route == 'IV':
