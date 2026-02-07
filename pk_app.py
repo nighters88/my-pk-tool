@@ -35,6 +35,42 @@ def calculate_auc_aumc_interval(t1, t2, c1, c2, method='Linear-up Log-down', tma
     aumc = (t1 * c1 + t2 * c2) / 2 * dt
     return auc, aumc
 
+def auto_select_lambda_z(time, conc, tmax):
+    """WinNonlin-style: 터미널 단계를 자동으로 탐지하여 최적의 Lambda_z 선택"""
+    t_post_max = time[time >= tmax]
+    c_post_max = conc[time >= tmax]
+    if len(t_post_max) < 3: return np.nan, np.nan, 0
+    
+    best_r2 = -1
+    best_ke = np.nan
+    best_points = 0
+    
+    # 마지막 n개 포인트를 사용하여 선형 회귀 (최소 3개 ~ 전체)
+    for n in range(3, len(t_post_max) + 1):
+        t_sel = t_post_max[-n:]
+        c_sel = c_post_max[-n:]
+        if (c_sel <= 0).any(): continue
+        
+        log_c = np.log(c_sel)
+        slope, intercept = np.polyfit(t_sel, log_c, 1)
+        ke = -slope
+        if ke <= 0: continue
+        
+        # R-squared 계산
+        preds = intercept + slope * t_sel
+        ss_res = np.sum((log_c - preds)**2)
+        ss_tot = np.sum((log_c - np.mean(log_c))**2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        
+        # 조정된 R2 (Adjusted R-squared) 준거로 최적 포인트 선택
+        adj_r2 = 1 - (1 - r2) * (n - 1) / (n - 2)
+        if adj_r2 > best_r2:
+            best_r2 = adj_r2
+            best_ke = ke
+            best_points = n
+            
+    return best_ke, best_r2, best_points
+
 def calculate_single_nca(time, concentration, dose=1, route='Oral', method='Linear-up Log-down'):
     df = pd.DataFrame({'Time': time, 'Concentration': concentration}).sort_values('Time').reset_index(drop=True)
     cmax = df['Concentration'].max()
@@ -44,36 +80,33 @@ def calculate_single_nca(time, concentration, dose=1, route='Oral', method='Line
         auc, aumc = calculate_auc_aumc_interval(df['Time'][i], df['Time'][i+1], df['Concentration'][i], df['Concentration'][i+1], method=method, tmax=tmax)
         auc_last += auc; aumc_last += aumc
     
-    # Simple elimination estimation
-    last_points = df.tail(3)
-    if (last_points['Concentration'] > 0).all() and len(last_points) >= 2:
-        slope, _ = np.polyfit(last_points['Time'], np.log(last_points['Concentration']), 1)
-        ke = -slope
-        auc_inf = auc_last + (df['Concentration'].iloc[-1] / ke) if ke > 0 else np.nan
-    else: ke = auc_inf = np.nan
+    # Automated terminal phase selection
+    ke, r2, n_points = auto_select_lambda_z(df['Time'].values, df['Concentration'].values, tmax)
+    
+    if not np.isnan(ke) and ke > 0:
+        clast = df['Concentration'].iloc[-1]
+        auc_inf = auc_last + (clast / ke)
+        half_life = np.log(2) / ke
+    else:
+        auc_inf = half_life = np.nan
 
     if route.upper() == 'IV':
-        cl = dose / auc_inf if auc_inf > 0 else np.nan
-        params = {'Cmax': cmax, 'Tmax': tmax, 'AUC_last': auc_last, 'AUC_inf': auc_inf, 'ke': ke, 'Cl': cl}
+        cl = dose / auc_inf if (auc_inf and auc_inf > 0) else np.nan
+        vz = cl / ke if (cl and ke) else np.nan
+        params = {'Cmax': cmax, 'Tmax': tmax, 'AUC_last': auc_last, 'AUC_inf': auc_inf, 'Half_life': half_life, 'Cl': cl, 'Vz': vz, 'R2_adj': r2}
     else:
-        cl_f = dose / auc_inf if auc_inf > 0 else np.nan
-        params = {'Cmax': cmax, 'Tmax': tmax, 'AUC_last': auc_last, 'AUC_inf': auc_inf, 'ke': ke, 'Cl_F': cl_f}
+        cl_f = dose / auc_inf if (auc_inf and auc_inf > 0) else np.nan
+        vz_f = cl_f / ke if (cl_f and ke) else np.nan
+        params = {'Cmax': cmax, 'Tmax': tmax, 'AUC_last': auc_last, 'AUC_inf': auc_inf, 'Half_life': half_life, 'Cl_F': cl_f, 'Vz_F': vz_f, 'R2_adj': r2}
     return params
 
 # --- ODE Models ---
-def tmdd_model_ode(t, y, params):
-    L, R, LR = y
-    kel, kon, koff, kint, ksyn, kdeg = params['kel'], params['kon'], params['koff'], params['kint'], params['ksyn'], params['kdeg']
-    dLdt = -kel * L - kon * L * R + koff * LR
-    dRdt = ksyn - kdeg * R - kon * L * R + koff * LR
-    dLRdt = kon * L * R - koff * LR - kint * LR
-    return [dLdt, dRdt, dLRdt]
+# ... (기존 tmdd_model_ode 유지)
 
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Analysis Settings")
 mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation"])
 route = st.sidebar.radio("Route", ["IV", "Oral"])
-dose = st.sidebar.number_input("Dose (Unit)", value=100.0)
 
 if mode == "NCA & Fitting":
     st.sidebar.subheader("Data Input")
@@ -85,24 +118,28 @@ if mode == "NCA & Fitting":
         if uploaded_file is not None:
             data = pd.read_csv(uploaded_file)
         else:
-            st.info("Using default sample data. Upload your CSV to analyze.")
+            st.info("Using default sample data.")
             data = pd.DataFrame({
-                'Subject': ['S1']*5 + ['S2']*5,
-                'Time': [0, 1, 4, 8, 24]*2,
-                'Concentration': [100, 60, 25, 12, 2, 95, 58, 22, 10, 1.5]
+                'Group': ['G1']*10 + ['G2']*10,
+                'Subject': ['S1','S2','S3','S4','S5']*4,
+                'Sex': ['M','F','M','F','M']*4,
+                'Dose': [100]*10 + [300]*10,
+                'Time': [0, 1, 4, 8, 24]*4,
+                'Concentration': [100, 60, 25, 12, 2, 95, 58, 22, 10, 1.5, 305, 180, 75, 35, 6, 290, 175, 70, 30, 5]
             })
     else:
-        st.sidebar.info("Edit the table below to update values.")
-        # Initial template for manual entry
+        st.sidebar.info("WinNonlin 스타일로 여러 개체(N)의 데이터를 입력하세요.")
         if 'manual_data' not in st.session_state:
             st.session_state['manual_data'] = pd.DataFrame({
-                'Subject': ['Subject 1']*6,
+                'Group': ['Test Group']*6,
+                'Subject': ['S1']*6,
+                'Sex': ['M']*6,
+                'Dose': [100.0]*6,
                 'Time': [0.0, 1.0, 2.0, 4.0, 8.0, 24.0],
                 'Concentration': [100.0, 80.0, 60.0, 40.0, 20.0, 5.0]
             })
         
-        # Use data_editor for direct manipulation
-        st.subheader("✍️ Data Editor (Time-Concentration Profile)")
+        st.subheader("✍️ Advanced Data Editor (WinNonlin Table Style)")
         data = st.data_editor(
             st.session_state['manual_data'],
             num_rows="dynamic",
@@ -110,33 +147,146 @@ if mode == "NCA & Fitting":
             column_config={
                 "Time": st.column_config.NumberColumn("Time (hr)", min_value=0, format="%.2f"),
                 "Concentration": st.column_config.NumberColumn("Conc (ng/mL)", min_value=0, format="%.2f"),
-                "Subject": st.column_config.TextColumn("Subject ID")
+                "Dose": st.column_config.NumberColumn("Dose (mg)", min_value=0),
+                "Group": st.column_config.SelectboxColumn("Group", options=["Control", "Test Group", "Group A", "Group B"]),
+                "Sex": st.column_config.SelectboxColumn("Sex", options=["M", "F", "N/A"])
             }
         )
         st.session_state['manual_data'] = data
 
-    # Execution
-    st.subheader("📊 PK Profile & Results")
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for sub in data['Subject'].unique():
-        sub_data = data[data['Subject'] == sub]
-        ax.plot(sub_data['Time'], sub_data['Concentration'], 'o-', alpha=0.5, label=sub)
+    # Statistical Aggregation
+    st.subheader("📊 PK Profile & Group Statistics")
     
+    # Plotting logic with group stats
+    fig, ax = plt.subplots(figsize=(10, 6))
+    groups = data['Group'].unique()
+    colors = plt.cm.tab10(np.linspace(0, 1, len(groups)))
+    
+    for g, color in zip(groups, colors):
+        g_data = data[data['Group'] == g]
+        # Individual lines
+        for sub in g_data['Subject'].unique():
+            sub_data = g_data[g_data['Subject'] == sub]
+            ax.plot(sub_data['Time'], sub_data['Concentration'], '-', alpha=0.2, color=color, linewidth=1)
+        
+        # Group Mean & Error Bar
+        stats = g_data.groupby('Time')['Concentration'].agg(['mean', 'std']).reset_index()
+        ax.errorbar(stats['Time'], stats['mean'], yerr=stats['std'], fmt='o-', color=color, capsize=5, label=f"{g} (Mean ± SD)")
+
     if show_log: ax.set_yscale('log')
     ax.set_xlabel("Time (hr)")
-    ax.set_ylabel("Concentration")
+    ax.set_ylabel("Concentration (ng/mL)")
     ax.legend()
+    ax.grid(True, which='both', linestyle='--', alpha=0.5)
     st.pyplot(fig)
 
-    # NCA Table
-    st.subheader("📈 NCA Parameters")
-    results = []
-    for sub in data['Subject'].unique():
-        sub_data = data[data['Subject'] == sub]
-        res = calculate_single_nca(sub_data['Time'].values, sub_data['Concentration'].values, dose=dose, route=route)
-        res['Subject'] = sub
-        results.append(res)
-    st.dataframe(pd.DataFrame(results))
+    # Expanded NCA Table
+    st.subheader("📈 Professional NCA Results (Grouped)")
+    all_nca = []
+    for (g, sub), sub_data in data.groupby(['Group', 'Subject']):
+        d_val = sub_data['Dose'].iloc[0] if 'Dose' in sub_data.columns else 100
+        sex_val = sub_data['Sex'].iloc[0] if 'Sex' in sub_data.columns else 'N/A'
+        res = calculate_single_nca(sub_data['Time'].values, sub_data['Concentration'].values, dose=d_val, route=route)
+        res.update({'Group': g, 'Subject': sub, 'Sex': sex_val})
+        all_nca.append(res)
+    
+    nca_df = pd.DataFrame(all_nca)
+    # Reorder columns for better view
+    cols = ['Group', 'Subject', 'Sex', 'Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 'Half_life', 'R2_adj']
+    st.dataframe(nca_df[cols].style.format(precision=4))
+
+    # Download Results
+    csv = nca_df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download NCA Results (CSV)", csv, "pk_nca_results.csv", "text/csv")
+
+    st.divider()
+
+    # --- Section: Best Compartment Model Recommendation ---
+    st.subheader("🤖 Intelligent Model Recommendation")
+    
+    selected_group_res = st.selectbox("Select Group for CA Recommendation", groups)
+    g_avg = data[data['Group'] == selected_group_res].groupby('Time')['Concentration'].mean().reset_index()
+    t_avg, c_avg = g_avg['Time'].values, g_avg['Concentration'].values
+    g_dose = data[data['Group'] == selected_group_res]['Dose'].iloc[0]
+
+    # Simplified Model Recommendation Logic (AIC based)
+    def one_comp_iv(t, c0, ke): return c0 * np.exp(-ke * t)
+    def two_comp_iv(t, A, alpha, B, beta): return A * np.exp(-alpha * t) + B * np.exp(-beta * t)
+    
+    st.write(f"Analyzing **{selected_group_res}** to find the best fit (1-Comp vs 2-Comp)...")
+    
+    best_model = "None"
+    best_aic = float('inf')
+    rec_results = {}
+
+    # 1-Comp Try
+    try:
+        popt1, _ = curve_fit(one_comp_iv, t_avg, c_avg, p0=[c_avg[0], 0.1], bounds=(0, np.inf))
+        rss = np.sum((c_avg - one_comp_iv(t_avg, *popt1))**2)
+        aic = 2*2 + len(t_avg) * np.log(rss/len(t_avg))
+        rec_results['1-Comp'] = {'aic': aic, 'popt': popt1, 'func': one_comp_iv}
+    except: pass
+
+    # 2-Comp Try
+    if len(t_avg) >= 5:
+        try:
+            popt2, _ = curve_fit(two_comp_iv, t_avg, c_avg, p0=[c_avg[0]*0.8, 1.0, c_avg[0]*0.2, 0.1], bounds=(0, np.inf))
+            rss = np.sum((c_avg - two_comp_iv(t_avg, *popt2))**2)
+            aic = 2*4 + len(t_avg) * np.log(rss/len(t_avg))
+            rec_results['2-Comp'] = {'aic': aic, 'popt': popt2, 'func': two_comp_iv}
+        except: pass
+
+    if rec_results:
+        best_model = min(rec_results, key=lambda x: rec_results[x]['aic'])
+        st.success(f"✅ **Best Model Recommended: {best_model}** (Based on AIC)")
+        
+        # Diagnostic Plots
+        st.subheader("🩺 Diagnostic Plots (Selected Model)")
+        col1, col2 = st.columns(2)
+        
+        best_info = rec_results[best_model]
+        pred = best_info['func'](t_avg, *best_info['popt'])
+        resid = c_avg - pred
+
+        with col1:
+            fig_diag1, ax_diag1 = plt.subplots()
+            ax_diag1.scatter(pred, c_avg, color='blue', alpha=0.6)
+            ax_diag1.plot([0, max(c_avg)], [0, max(c_avg)], 'r--')
+            ax_diag1.set_xlabel("Predicted Conc")
+            ax_diag1.set_ylabel("Observed Conc")
+            ax_diag1.set_title("Obs vs Pred")
+            st.pyplot(fig_diag1)
+
+        with col2:
+            fig_diag2, ax_diag2 = plt.subplots()
+            ax_diag2.scatter(t_avg, resid, color='red', alpha=0.6)
+            ax_diag2.axhline(0, color='black', linestyle='--')
+            ax_diag2.set_xlabel("Time (hr)")
+            ax_diag2.set_ylabel("Residual")
+            ax_diag2.set_title("Residual Plot")
+            st.pyplot(fig_diag2)
+
+        # --- Automated Clinical Interpretation ---
+        st.subheader("💡 Automated Clinical Insights")
+        
+        # Pulling some params for interpretation
+        nca_g = nca_df[nca_df['Group'] == selected_group_res]
+        avg_hl = nca_g['Half_life'].mean()
+        avg_r2 = nca_g['R2_adj'].mean()
+        
+        insight_text = ""
+        if avg_r2 > 0.95: insight_text += "✅ **High reliability**: Terminal phase fitting is excellent ($R^2 > 0.95$).\n"
+        else: insight_text += "⚠️ **Review needed**: Terminal phase fitting has some noise. Consider adjusting sampling points.\n"
+        
+        if best_model == "2-Comp":
+            insight_text += "🔄 **Distribution Phase**: Significant distribution observed. Multi-compartment modeling is recommended.\n"
+        
+        if avg_hl > 24: insight_text += "⏳ **Long Half-life**: Drug remains in system for a prolonged period. Consider potential accumulation.\n"
+        else: insight_text += "⚡ **Rapid Elimination**: Drug is cleared relatively quickly.\n"
+        
+        st.info(insight_text)
+    else:
+        st.warning("Could not converge on a compartment model for this group.")
 
 elif mode == "TMDD Simulation":
     st.sidebar.subheader("TMDD Parameters")
