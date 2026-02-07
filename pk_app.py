@@ -335,6 +335,7 @@ if mode == "NCA & Fitting":
     st.subheader("📊 PK Profile & Group Statistics")
     
     # Plotting logic with group stats
+    groups = data['Group'].unique()
     # Plotly Individual Profiles
     fig = px.line(data, x='Time', y='Concentration', color='Group', line_group='Subject',
                  hover_data=['Subject', 'Dose'], markers=True, 
