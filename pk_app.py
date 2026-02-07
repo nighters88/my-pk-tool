@@ -136,15 +136,19 @@ def calculate_single_nca(time, concentration, dose=1, route='Oral', method='Line
     df = pd.DataFrame({'Time': time, 'Concentration': concentration}).sort_values('Time').reset_index(drop=True)
     cmax = df['Concentration'].max()
     tmax = df.loc[df['Concentration'].idxmax(), 'Time']
+    # Filter for valid terminal phase fitting (non-zero concentrations)
+    df_clean = df[df['Concentration'] > 0].copy()
+    
     auc_last = aumc_last = 0
     for i in range(len(df) - 1):
         auc, aumc = calculate_auc_aumc_interval(df['Time'][i], df['Time'][i+1], df['Concentration'][i], df['Concentration'][i+1], method=method, tmax=tmax)
-    for i in range(len(df_clean) - 1):
-        auc, aumc = calculate_auc_aumc_interval(df_clean['Time'][i], df_clean['Time'][i+1], df_clean['Concentration'][i], df_clean['Concentration'][i+1], method=method)
         auc_last += auc
         aumc_last += aumc
     
     # Automated terminal phase selection (WinNonlin-style)
+    if df_clean.empty:
+        return {'Cmax': cmax, 'Tmax': tmax, 'AUC_last': auc_last, 'AUC_inf': auc_last, 'AUC_%extrap': 0, 't1/2': np.nan, 'Cl': np.nan, 'Vz': np.nan, 'Cl_F': np.nan, 'Vz_F': np.nan, 'Vss': np.nan, 'MRT_inf': np.nan, 'Lambda_z': np.nan, 'R2_lz': np.nan}
+
     t_clean = df_clean['Time'].values
     c_clean = df_clean['Concentration'].values
     
