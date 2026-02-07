@@ -143,7 +143,7 @@ def pk_pd_link_model_ode(t, y, params):
 
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Analysis Settings")
-mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation"])
+mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation", "Population Analysis"])
 route = st.sidebar.radio("Route", ["IV", "Oral"])
 
 if mode == "NCA & Fitting":
@@ -251,6 +251,14 @@ if mode == "NCA & Fitting":
     def one_comp_iv(t, c0, ke): return c0 * np.exp(-ke * t)
     def two_comp_iv(t, A, alpha, B, beta): return A * np.exp(-alpha * t) + B * np.exp(-beta * t)
     
+    # New Oral Models
+    def one_comp_oral(t, ka, ke, v_f, dose):
+        return (dose * ka / (v_f * (ka - ke))) * (np.exp(-ke * t) - np.exp(-ka * t))
+    
+    def one_comp_oral_fit(t, ka, ke, v_f):
+        # dose is captured from outer scope
+        return one_comp_oral(t, ka, ke, v_f, g_dose)
+    
     st.write(f"Analyzing **{selected_group_res}** to find the best fit (1-Comp vs 2-Comp)...")
     
     best_model = "None"
@@ -258,20 +266,38 @@ if mode == "NCA & Fitting":
     rec_results = {}
 
     # 1-Comp Try
+    use_wls = st.sidebar.checkbox("Use WLS (1/Y² Weighting)", value=True, help="저농도 구간 정밀도를 높이기 위해 WinNonlin 스타일 가중치 적용")
+    weights = 1.0 / (c_avg**2 + 1e-6) if use_wls else None # Add small epsilon to avoid div by zero
+
     try:
-        popt1, _ = curve_fit(one_comp_iv, t_avg, c_avg, p0=[c_avg[0], 0.1], bounds=(0, np.inf))
-        rss = np.sum((c_avg - one_comp_iv(t_avg, *popt1))**2)
-        aic = 2*2 + len(t_avg) * np.log(rss/len(t_avg))
-        rec_results['1-Comp'] = {'aic': aic, 'popt': popt1, 'func': one_comp_iv}
-    except: pass
+        if route == "IV":
+            popt1, pcov1 = curve_fit(one_comp_iv, t_avg, c_avg, p0=[c_avg[0], 0.1], bounds=(0, np.inf), sigma=weights)
+        else:
+            popt1, pcov1 = curve_fit(one_comp_oral_fit, t_avg, c_avg, p0=[1.0, 0.1, 10.0], bounds=(0, np.inf), sigma=weights)
+        
+        func1 = one_comp_iv if route == "IV" else one_comp_oral_fit
+        rss = np.sum((c_avg - func1(t_avg, *popt1))**2)
+        aic = 2*len(popt1) + len(t_avg) * np.log(rss/len(t_avg))
+        
+        # Calculate CV% (Standard Error / Estimate * 100)
+        perr1 = np.sqrt(np.diag(pcov1))
+        cv1 = (perr1 / popt1) * 100
+        
+        rec_results['1-Comp'] = {'aic': aic, 'popt': popt1, 'func': func1, 'cv': cv1}
+    except Exception as e: 
+        st.write(f"1-Comp Fit Error: {e}")
 
     # 2-Comp Try
-    if len(t_avg) >= 5:
+    if len(t_avg) >= 5 and route == "IV": # 2-comp Oral is complex for simple recommendation, keep IV for now
         try:
-            popt2, _ = curve_fit(two_comp_iv, t_avg, c_avg, p0=[c_avg[0]*0.8, 1.0, c_avg[0]*0.2, 0.1], bounds=(0, np.inf))
+            popt2, pcov2 = curve_fit(two_comp_iv, t_avg, c_avg, p0=[c_avg[0]*0.8, 1.0, c_avg[0]*0.2, 0.1], bounds=(0, np.inf), sigma=weights)
             rss = np.sum((c_avg - two_comp_iv(t_avg, *popt2))**2)
-            aic = 2*4 + len(t_avg) * np.log(rss/len(t_avg))
-            rec_results['2-Comp'] = {'aic': aic, 'popt': popt2, 'func': two_comp_iv}
+            aic = 2*len(popt2) + len(t_avg) * np.log(rss/len(t_avg))
+            
+            perr2 = np.sqrt(np.diag(pcov2))
+            cv2 = (perr2 / popt2) * 100
+            
+            rec_results['2-Comp'] = {'aic': aic, 'popt': popt2, 'func': two_comp_iv, 'cv': cv2}
         except: pass
 
     if rec_results:
@@ -285,6 +311,14 @@ if mode == "NCA & Fitting":
         best_info = rec_results[best_model]
         pred = best_info['func'](t_avg, *best_info['popt'])
         resid = c_avg - pred
+        
+        # Display Parameter Confidence
+        st.write("📊 **Parameter Estimates & Reliability (WinNonlin Style)**")
+        param_names = ['C0', 'ke'] if best_model == '1-Comp' and route == 'IV' else (['ka', 'ke', 'V/F'] if best_model == '1-Comp' else ['A', 'alpha', 'B', 'beta'])
+        perf_data = []
+        for name, val, cv in zip(param_names, best_info['popt'], best_info['cv']):
+            perf_data.append({'Parameter': name, 'Estimate': val, 'CV%': cv})
+        st.table(pd.DataFrame(perf_data).set_index('Parameter'))
 
         with col1:
             fig_diag1, ax_diag1 = plt.subplots()
@@ -480,6 +514,57 @@ elif mode == "PK/PD Correlation":
     # Summary Table
     st.subheader("📋 PK/PD Parameter Summary")
     st.dataframe(sum_df.style.format(precision=2), use_container_width=True)
+
+elif mode == "Population Analysis":
+    st.subheader("👨‍👩‍👧‍👦 Population PK Simulation (IIV)")
+    st.info("개인 간 변동성(Inter-Individual Variability)을 고려한 집단 PK 시뮬레이션입니다 (Monte Carlo method).")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("**Model Parameters**")
+        pop_dose = st.number_input("Dose", value=100.0)
+        pop_cl = st.number_input("Population Cl (L/hr)", value=2.0)
+        pop_v = st.number_input("Population V (L)", value=20.0)
+    
+    with col2:
+        st.write("**Variability (CV%)**")
+        cv_cl = st.slider("Cl Variability (CV%)", 0, 100, 30)
+        cv_v = st.slider("V Variability (CV%)", 0, 100, 20)
+        n_subjects = st.select_slider("Number of Subjects", options=[10, 50, 100, 500], value=100)
+
+    t_eval = np.linspace(0, 48, 100)
+    pop_results = []
+    
+    # Monte Carlo Logic
+    for i in range(n_subjects):
+        # Lognormal distribution for positive parameters
+        cl_i = pop_cl * np.exp(np.random.normal(0, cv_cl/100))
+        v_i = pop_v * np.exp(np.random.normal(0, cv_v/100))
+        ke_i = cl_i / v_i
+        cp_i = (pop_dose / v_i) * np.exp(-ke_i * t_eval)
+        pop_results.append(cp_i)
+    
+    pop_array = np.array(pop_results)
+    p5 = np.percentile(pop_array, 5, axis=0)
+    p50 = np.percentile(pop_array, 50, axis=0)
+    p95 = np.percentile(pop_array, 95, axis=0)
+    
+    fig_pop, ax_pop = plt.subplots(figsize=(10, 6))
+    for i in range(min(n_subjects, 50)): # Plot first 50 spaghetti lines
+        ax_pop.plot(t_eval, pop_array[i], color='gray', alpha=0.1)
+    
+    ax_pop.plot(t_eval, p50, 'r-', linewidth=2, label="Median (P50)")
+    ax_pop.fill_between(t_eval, p5, p95, color='red', alpha=0.2, label="90% Prediction Interval (P5-P95)")
+    
+    ax_pop.set_xlabel("Time (hr)")
+    ax_pop.set_ylabel("Concentration (ng/mL)")
+    ax_pop.set_title(f"Population PK Simulation (N={n_subjects})")
+    ax_pop.set_yscale('log')
+    ax_pop.legend()
+    ax_pop.grid(True, which='both', linestyle='--', alpha=0.5)
+    st.pyplot(fig_pop)
+    
+    st.success(f"✅ Simulation Complete. 90% PI generated for Cl={pop_cl} L/hr (CV {cv_cl}%) and V={pop_v} L (CV {cv_v}%).")
 
 st.divider()
 st.caption("Developed by Antigravity PK Engine | Automatic Updates via GitHub")
