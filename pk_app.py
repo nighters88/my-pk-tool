@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
-from scipy.integrate import solve_ivp
+from scipy.integrate import solve_ivp, trapezoid
 import io
 
 # --- Page Config ---
@@ -423,7 +423,7 @@ elif mode == "PK/PD Correlation":
         
         # Summary Params
         cmax = np.max(cp)
-        auc = np.trapz(cp, sol.t)
+        auc = trapezoid(cp, sol.t)
         emax_obs = np.max(effect)
         teff_max = sol.t[np.argmax(effect)]
         
