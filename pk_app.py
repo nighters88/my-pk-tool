@@ -715,13 +715,13 @@ elif mode == "PK/PD Correlation":
     
     ax_pop.set_xlabel("Time (hr)")
     ax_pop.set_ylabel("Concentration (ng/mL)")
-    ax_pop.set_title(f"Population PK Simulation (N={n_subjects})")
+    ax_pop.set_title(f"Population PK Simulation (N={n_subj_actual})")
     ax_pop.set_yscale('log')
     ax_pop.legend()
     ax_pop.grid(True, which='both', linestyle='--', alpha=0.5)
     st.pyplot(fig_pop)
     
-    st.success(f"✅ Simulation Complete. 90% PI generated for Cl={pop_cl} L/hr (CV {cv_cl}%) and V={pop_v} L (CV {cv_v}%).")
+    st.success(f"✅ Simulation Complete for N={n_subj_actual} subjects with IIV (Cl CV {cv_cl}%, V CV {cv_v}%).")
 
 st.divider()
 st.caption("Developed by Antigravity PK Engine | Automatic Updates via GitHub")
