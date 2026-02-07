@@ -6,6 +6,8 @@ from scipy.optimize import curve_fit
 from scipy.integrate import solve_ivp, trapezoid
 from scipy.stats import linregress
 import io
+import plotly.express as px
+import plotly.graph_objects as go
 
 # --- Page Config ---
 st.set_page_config(page_title="Advanced PK Analysis Tool", layout="wide")
@@ -333,27 +335,12 @@ if mode == "NCA & Fitting":
     st.subheader("📊 PK Profile & Group Statistics")
     
     # Plotting logic with group stats
-    fig, ax = plt.subplots(figsize=(10, 6))
-    groups = data['Group'].unique()
-    colors = plt.cm.tab10(np.linspace(0, 1, len(groups)))
-    
-    for g, color in zip(groups, colors):
-        g_data = data[data['Group'] == g]
-        # Individual lines
-        for sub in g_data['Subject'].unique():
-            sub_data = g_data[g_data['Subject'] == sub]
-            ax.plot(sub_data['Time'], sub_data['Concentration'], '-', alpha=0.2, color=color, linewidth=1)
-        
-        # Group Mean & Error Bar
-        stats = g_data.groupby('Time')['Concentration'].agg(['mean', 'std']).reset_index()
-        ax.errorbar(stats['Time'], stats['mean'], yerr=stats['std'], fmt='o-', color=color, capsize=5, label=f"{g} (Mean ± SD)")
-
-    if show_log: ax.set_yscale('log')
-    ax.set_xlabel("Time (hr)")
-    ax.set_ylabel("Concentration (ng/mL)")
-    ax.legend()
-    ax.grid(True, which='both', linestyle='--', alpha=0.5)
-    st.pyplot(fig)
+    # Plotly Individual Profiles
+    fig = px.line(data, x='Time', y='Concentration', color='Group', line_group='Subject',
+                 hover_data=['Subject', 'Dose'], markers=True, 
+                 title="Individual PK Profiles (Interactive)")
+    if show_log: fig.update_yaxes(type='log')
+    st.plotly_chart(fig, use_container_width=True)
 
     # Expanded NCA Table
     st.subheader("📈 Professional NCA Results (Grouped)")
@@ -373,18 +360,23 @@ if mode == "NCA & Fitting":
         # Show Dose Proportionality logic
         d_range = sorted(data['Dose'].unique())
         if len(d_range) >= 2:
-            st.write("**Dose Proportionality Plot**")
+            st.write("**Dose Proportionality Plot & Power Model**")
             dp_data = nca_df.groupby('Dose').agg({'AUC_last': 'mean', 'Cmax': 'mean'}).reset_index()
-            fig_dp, ax_dp = plt.subplots(1, 2, figsize=(10, 4))
-            ax_dp[0].plot(dp_data['Dose'], dp_data['AUC_last'], 'o-')
-            ax_dp[0].set_title("Dose vs AUC_last")
-            ax_dp[0].set_xlabel("Dose")
-            ax_dp[0].set_ylabel("AUC_last")
-            ax_dp[1].plot(dp_data['Dose'], dp_data['Cmax'], 's-')
-            ax_dp[1].set_title("Dose vs Cmax")
-            ax_dp[1].set_xlabel("Dose")
-            ax_dp[1].set_ylabel("Cmax")
-            st.pyplot(fig_dp)
+            # Power Model: ln(y) = a + b * ln(dose)
+            try:
+                log_d = np.log(nca_df['Dose'])
+                log_auc = np.log(nca_df['AUC_last'])
+                slope, intercept, r_val, _, _ = linregress(log_d, log_auc)
+                st.info(f"📈 **Power Model Analysis**: $\\beta = {slope:.3f}$ ($R^2 = {r_val**2:.3f}$)")
+                st.caption("$\beta \approx 1$ indicates dose proportionality. $\beta > 1$ (Supra-linear), $\beta < 1$ (Sub-linear)")
+            except: pass
+
+            fig_dp = go.Figure()
+            fig_dp.add_trace(go.Scatter(x=dp_data['Dose'], y=dp_data['AUC_last'], mode='lines+markers', name='AUC_last'))
+            fig_dp.add_trace(go.Scatter(x=dp_data['Dose'], y=dp_data['Cmax'], mode='lines+markers', name='Cmax', yaxis='y2'))
+            fig_dp.update_layout(title="Dose Proportionality", xaxis_title="Dose", yaxis_title="AUC_last",
+                                 yaxis2=dict(title="Cmax", overlaying='y', side='right'))
+            st.plotly_chart(fig_dp, use_container_width=True)
         else:
             st.info("Need at least 2 unique doses for dose proportionality analysis.")
     else: # Clinical (Variability/Accumulation)
@@ -413,8 +405,8 @@ if mode == "NCA & Fitting":
         if acc_results:
             st.dataframe(pd.DataFrame(acc_results).set_index('Group').style.format(precision=2))
 
-        # 3. Bioequivalence-lite (90% Confidence Interval)
-        st.write("**Geometric Mean & 90% Confidence Interval (Log-normal)**")
+        # 3. Bioequivalence-lite (Forest Plot)
+        st.write("**Geometric Mean & 90% Confidence Interval (Forest Plot)**")
         be_results = []
         for g, g_df in nca_df.groupby('Group'):
             for p in ['Cmax', 'AUC_last']:
@@ -423,13 +415,19 @@ if mode == "NCA & Fitting":
                     log_vals = np.log(vals)
                     mean_log = np.mean(log_vals)
                     se_log = np.std(log_vals, ddof=1) / np.sqrt(len(vals))
-                    t_val = 1.645 # Approx for 90% CI for large-ish N (can use scipy.stats.t.ppf if needed)
-                    ci_lower = np.exp(mean_log - t_val * se_log)
-                    ci_upper = np.exp(mean_log + t_val * se_log)
+                    t_val = 1.645 
+                    ci_lower, ci_upper = np.exp(mean_log - t_val * se_log), np.exp(mean_log + t_val * se_log)
                     geo_mean = np.exp(mean_log)
-                    be_results.append({'Group': g, 'Parameter': p, 'GeoMean': geo_mean, '90% CI Lower': ci_lower, '90% CI Upper': ci_upper})
+                    be_results.append({'Group': g, 'Parameter': p, 'GeoMean': geo_mean, 'Lower': ci_lower, 'Upper': ci_upper})
+        
         if be_results:
-            st.table(pd.DataFrame(be_results).set_index(['Group', 'Parameter']))
+            be_df = pd.DataFrame(be_results)
+            fig_forest = px.scatter(be_df, x='GeoMean', y='Group', color='Parameter', 
+                                   error_x=be_df['Upper']-be_df['GeoMean'], 
+                                   error_x_minus=be_df['GeoMean']-be_df['Lower'],
+                                   title="PK Parameter Forest Plot (90% CI)")
+            st.plotly_chart(fig_forest, use_container_width=True)
+            st.table(be_df.set_index(['Group', 'Parameter']))
 
     # Reorder columns for better view
     if route == 'IV':
@@ -659,16 +657,20 @@ elif mode == "TMDD Simulation":
     
     # Observation Points from Editor
     groups = data['Group'].unique()
-    colors = plt.cm.tab10(np.linspace(0, 1, len(groups)))
-    for g, color in zip(groups, colors):
-        g_data = data[data['Group'] == g]
-        ax1.scatter(g_data['Time'], g_data['Concentration'], color=color, label=f"Obs: {g}", alpha=0.7)
-        ax1.plot(g_data['Time'], g_data['Concentration'], '--', color=color, alpha=0.3)
-
-    ax1.set_yscale('log')
-    ax1.set_ylabel("Conc (nM)")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    # Plotly TMDD
+    fig_tmdd = go.Figure()
+    # Observation points
+    # Ensure tmdd_data is defined, assuming it's 'data' from the editor
+    tmdd_data = data 
+    fig_tmdd.add_trace(go.Scatter(x=tmdd_data['Time'], y=tmdd_data['Concentration'], mode='markers', name='Observed Conc', marker=dict(symbol='circle-open')))
+    # Simulation lines - using unique doses from the data editor
+    d_range = sorted(tmdd_data['Dose'].unique())
+    for i, d in enumerate(d_range):
+        y0_sim = [d, R0, 0] # Use 'd' as the initial dose for simulation
+        sol_sim = solve_ivp(tmdd_model_ode, (0, t_end), y0_sim, t_eval=np.linspace(0, t_end, 100), args=(params,))
+        fig_tmdd.add_trace(go.Scatter(x=sol_sim.t, y=sol_sim.y[0], mode='lines', name=f"Sim {d}nM"))
+    fig_tmdd.update_layout(title="TMDD Simulation vs. Observed", xaxis_title="Time", yaxis_title="Concentration", yaxis_type='log')
+    st.plotly_chart(fig_tmdd, use_container_width=True)
 
     ro = (sol.y[2] / (sol.y[1] + sol.y[2])) * 100
     ax2.plot(sol.t, ro, color='black', label="Sim: Receptor Occupancy")
@@ -870,20 +872,16 @@ elif mode == "PK/PD Correlation":
     p50 = np.percentile(pop_array, 50, axis=0)
     p95 = np.percentile(pop_array, 95, axis=0)
     
-    fig_pop, ax_pop = plt.subplots(figsize=(10, 6))
-    for i in range(min(n_subj_actual, 50)): # Plot first 50 spaghetti lines
-        ax_pop.plot(t_eval, pop_array[i], color='gray', alpha=0.1)
+    fig_pop = go.Figure()
+    for i in range(min(n_subj_actual, 50)): 
+        fig_pop.add_trace(go.Scatter(x=t_eval, y=pop_array[i], mode='lines', line=dict(color='gray', width=1), opacity=0.1, showlegend=False))
     
-    ax_pop.plot(t_eval, p50, 'r-', linewidth=2, label="Median (P50)")
-    ax_pop.fill_between(t_eval, p5, p95, color='red', alpha=0.2, label="90% Prediction Interval (P5-P95)")
+    fig_pop.add_trace(go.Scatter(x=t_eval, y=p50, mode='lines', name="Median (P50)", line=dict(color='red', width=3)))
+    fig_pop.add_trace(go.Scatter(x=t_eval, y=p95, mode='lines', line=dict(width=0), showlegend=False))
+    fig_pop.add_trace(go.Scatter(x=t_eval, y=p5, mode='lines', fill='tonexty', fillcolor='rgba(255, 0, 0, 0.2)', name="90% Prediction Interval"))
     
-    ax_pop.set_xlabel("Time (hr)")
-    ax_pop.set_ylabel("Concentration (ng/mL)")
-    ax_pop.set_title(f"Population PK Simulation (N={n_subj_actual})")
-    ax_pop.set_yscale('log')
-    ax_pop.legend()
-    ax_pop.grid(True, which='both', linestyle='--', alpha=0.5)
-    st.pyplot(fig_pop)
+    fig_pop.update_layout(title=f"Population PK Simulation (N={n_subj_actual})", xaxis_title="Time (hr)", yaxis_title="Concentration", yaxis_type='log')
+    st.plotly_chart(fig_pop, use_container_width=True)
     
     st.success(f"✅ Simulation Complete for N={n_subj_actual} subjects with IIV (Cl CV {cv_cl}%, V CV {cv_v}%).")
 
@@ -969,30 +967,19 @@ elif mode == "Dose-Response & PD Modeling":
             # Plots
             col1, col2 = st.columns(2)
             with col1:
-                st.write("**Conc vs. Effect (PD Model)**")
-                fig_pd, ax_pd = plt.subplots()
-                # Sort for smooth line
+                st.write("**Conc vs. Effect (PD Model - Interactive)**")
                 c_range = np.linspace(min(conc_vals), max(conc_vals), 100)
-                ax_pd.scatter(conc_vals, c_vals, color='blue', alpha=0.5, label='Observed')
-                ax_pd.plot(c_range, b_info['func'](c_range, *b_info['popt']), 'r-', label=f'Fit: {best_pd}')
-                ax_pd.set_xlabel("Concentration")
-                ax_pd.set_ylabel("Effect")
-                ax_pd.legend()
-                st.pyplot(fig_pd)
+                fig_pd = go.Figure()
+                fig_pd.add_trace(go.Scatter(x=conc_vals, y=c_vals, mode='markers', name='Observed'))
+                fig_pd.add_trace(go.Scatter(x=c_range, y=b_info['func'](c_range, *b_info['popt']), mode='lines', name=f'Fit: {best_pd}'))
+                fig_pd.update_layout(xaxis_title="Concentration", yaxis_title="Effect")
+                st.plotly_chart(fig_pd, use_container_width=True)
 
             with col2:
                 st.write("**Dose vs. Response (Hill Analysis)**")
-                # Dose-Response analysis (Peak Effect vs Dose)
-                dr_data = pd_data.groupby('Group').agg({'Dose': 'first', 'Effect': 'max'}).reset_index()
-                dr_data = dr_data.sort_values('Dose')
-                
-                fig_dr, ax_dr = plt.subplots()
-                ax_dr.scatter(dr_data['Dose'], dr_data['Effect'], color='green', s=100)
-                ax_dr.plot(dr_data['Dose'], dr_data['Effect'], 'g--')
-                ax_dr.set_xlabel("Dose (mg)")
-                ax_dr.set_ylabel("Peak Effect")
-                ax_dr.set_xscale('log')
-                st.pyplot(fig_dr)
+                dr_data = pd_data.groupby('Group').agg({'Dose': 'first', 'Effect': 'max'}).reset_index().sort_values('Dose')
+                fig_dr = px.line(dr_data, x='Dose', y='Effect', markers=True, log_x=True, title="Dose-Response Curve")
+                st.plotly_chart(fig_dr, use_container_width=True)
                 
                 # Hill Fit for Dose-Response
                 try:
