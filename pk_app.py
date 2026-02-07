@@ -139,27 +139,83 @@ def calculate_single_nca(time, concentration, dose=1, route='Oral', method='Line
     auc_last = aumc_last = 0
     for i in range(len(df) - 1):
         auc, aumc = calculate_auc_aumc_interval(df['Time'][i], df['Time'][i+1], df['Concentration'][i], df['Concentration'][i+1], method=method, tmax=tmax)
-        auc_last += auc; aumc_last += aumc
+    for i in range(len(df_clean) - 1):
+        auc, aumc = calculate_auc_aumc_interval(df_clean['Time'][i], df_clean['Time'][i+1], df_clean['Concentration'][i], df_clean['Concentration'][i+1], method=method)
+        auc_last += auc
+        aumc_last += aumc
     
-    # Automated terminal phase selection
-    ke, r2, n_points = auto_select_lambda_z(df['Time'].values, df['Concentration'].values, tmax)
+    # Automated terminal phase selection (WinNonlin-style)
+    t_clean = df_clean['Time'].values
+    c_clean = df_clean['Concentration'].values
     
-    if not np.isnan(ke) and ke > 0:
-        clast = df['Concentration'].iloc[-1]
-        auc_inf = auc_last + (clast / ke)
-        half_life = np.log(2) / ke
-    else:
-        auc_inf = half_life = np.nan
+    # Filter for post-Tmax concentrations for terminal phase
+    t_post_max = t_clean[t_clean >= tmax]
+    c_post_max = c_clean[t_clean >= tmax]
+    
+    best_r2 = -1
+    best_lambda_z = np.nan
+    
+    if len(t_post_max) >= 3:
+        t_log = t_post_max
+        c_log = np.log(c_post_max)
+        
+        # Try last 3, 4, 5 points for linear regression
+        for n in range(3, min(6, len(t_log) + 1)):
+            t_sel = t_log[-n:]
+            c_sel = c_log[-n:]
+            
+            # Ensure there's variability for regression
+            if len(np.unique(t_sel)) < 2 or len(np.unique(c_sel)) < 2:
+                continue
+            
+            try:
+                slope, intercept, r_value, _, _ = linregress(t_sel, c_sel)
+                # Only consider positive slopes (negative ke)
+                if slope < 0:
+                    r2_adj = 1 - (1 - r_value**2) * (n - 1) / (n - 2) # Adjusted R2
+                    if r2_adj > best_r2:
+                        best_r2 = r2_adj
+                        best_lambda_z = -slope
+            except ValueError: # Handle cases where linregress fails (e.g., all same values)
+                pass
 
-    if route.upper() == 'IV':
-        cl = dose / auc_inf if (auc_inf and auc_inf > 0) else np.nan
-        vz = cl / ke if (cl and ke) else np.nan
-        params = {'Cmax': cmax, 'Tmax': tmax, 'AUC_last': auc_last, 'AUC_inf': auc_inf, 'Half_life': half_life, 'Cl': cl, 'Vz': vz, 'R2_adj': r2}
-    else:
-        cl_f = dose / auc_inf if (auc_inf and auc_inf > 0) else np.nan
-        vz_f = cl_f / ke if (cl_f and ke) else np.nan
-        params = {'Cmax': cmax, 'Tmax': tmax, 'AUC_last': auc_last, 'AUC_inf': auc_inf, 'Half_life': half_life, 'Cl_F': cl_f, 'Vz_F': vz_f, 'R2_adj': r2}
-    return params
+    thalf = np.log(2) / best_lambda_z if best_lambda_z > 0 else np.nan
+    
+    # AUC INF calculations
+    clast = df_clean['Concentration'].iloc[-1] if not df_clean.empty else 0
+    tlast = df_clean['Time'].iloc[-1] if not df_clean.empty else 0
+
+    auc_extrap = clast / best_lambda_z if best_lambda_z > 0 else 0
+    auc_inf = auc_last + auc_extrap
+    auc_pextrap = (auc_extrap / auc_inf * 100) if auc_inf > 0 else np.nan
+    
+    # Clearance and Volume
+    cl = dose / auc_inf if auc_inf > 0 else np.nan
+    vz = cl / best_lambda_z if best_lambda_z > 0 else np.nan
+    
+    # MRT and Vss
+    # AUMC_extrap = C_last * T_last / Lambda_z + C_last / (Lambda_z^2)
+    aumc_extrap = (clast * tlast / best_lambda_z) + (clast / (best_lambda_z**2)) if best_lambda_z > 0 else 0
+    aumc_inf = aumc_last + aumc_extrap
+    mrt_inf = aumc_inf / auc_inf if auc_inf > 0 else np.nan
+    vss = cl * mrt_inf if not np.isnan(cl) and not np.isnan(mrt_inf) else np.nan
+
+    # For oral, Cl and Vz are apparent (Cl/F, Vz/F)
+    if route.upper() == 'ORAL':
+        cl_f = cl
+        vz_f = vz
+        cl = np.nan # Set to nan for IV-specific parameters
+        vz = np.nan
+    else: # IV
+        cl_f = np.nan # Set to nan for Oral-specific parameters
+        vz_f = np.nan
+
+    return {
+        'Cmax': cmax, 'Tmax': tmax, 'AUC_last': auc_last, 'AUC_inf': auc_inf,
+        'AUC_%extrap': auc_pextrap, 't1/2': thalf, 'Cl': cl, 'Vz': vz,
+        'Cl_F': cl_f, 'Vz_F': vz_f,
+        'Vss': vss, 'MRT_inf': mrt_inf, 'Lambda_z': best_lambda_z, 'R2_lz': best_r2
+    }
 
 # --- ODE Models ---
 def tmdd_model_ode(t, y, params):
@@ -224,6 +280,7 @@ def pk_mm_oral_ode(t, y, ka, vmax, km, vd):
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Analysis Settings")
 mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation", "Population Analysis", "Dose-Response & PD Modeling"])
+eval_type = st.sidebar.radio("Evaluation Context", ["Preclinical (TK/Linearity)", "Clinical (Variability/Accumulation)"])
 route = st.sidebar.radio("Route", ["IV", "Oral"])
 
 if mode == "NCA & Fitting":
@@ -300,9 +357,55 @@ if mode == "NCA & Fitting":
         all_nca.append(res)
     
     nca_df = pd.DataFrame(all_nca)
+    
+    # Result Display based on Context
+    if eval_type == "Preclinical (TK/Linearity)":
+        st.subheader("🔬 Preclinical Evaluation (Linearity & TK)")
+        # Show Dose Proportionality logic
+        d_range = sorted(data['Dose'].unique())
+        if len(d_range) >= 2:
+            st.write("**Dose Proportionality Plot**")
+            dp_data = nca_df.groupby('Dose').agg({'AUC_last': 'mean', 'Cmax': 'mean'}).reset_index()
+            fig_dp, ax_dp = plt.subplots(1, 2, figsize=(10, 4))
+            ax_dp[0].plot(dp_data['Dose'], dp_data['AUC_last'], 'o-')
+            ax_dp[0].set_title("Dose vs AUC_last")
+            ax_dp[0].set_xlabel("Dose")
+            ax_dp[0].set_ylabel("AUC_last")
+            ax_dp[1].plot(dp_data['Dose'], dp_data['Cmax'], 's-')
+            ax_dp[1].set_title("Dose vs Cmax")
+            ax_dp[1].set_xlabel("Dose")
+            ax_dp[1].set_ylabel("Cmax")
+            st.pyplot(fig_dp)
+        else:
+            st.info("Need at least 2 unique doses for dose proportionality analysis.")
+    else: # Clinical (Variability/Accumulation)
+        st.subheader("🏥 Clinical Evaluation (Variability & Steady-state)")
+        # CV% calculation for subjects within same group
+        # Ensure 'Cl' and 'Vz' are present and handle oral vs IV specific parameters
+        if route == 'IV':
+            params_to_check = ['Cmax', 'AUC_last', 'Cl', 'Vz']
+        else: # Oral
+            params_to_check = ['Cmax', 'AUC_last', 'Cl_F', 'Vz_F']
+        
+        # Filter for parameters that are not all NaN
+        available_params = [p for p in params_to_check if not nca_df[p].isnull().all()]
+
+        if available_params:
+            group_cv = nca_df.groupby('Group')[available_params].agg(lambda x: (np.std(x)/np.mean(x)*100) if np.mean(x)!=0 else np.nan)
+            st.write("**Inter-subject Variability (CV%)**")
+            st.dataframe(group_cv.style.format("{:.1f}%"))
+        else:
+            st.info("No valid parameters to calculate inter-subject variability.")
+
     # Reorder columns for better view
-    cols = ['Group', 'Subject', 'Sex', 'Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 'Half_life', 'R2_adj']
-    st.dataframe(nca_df[cols].style.format(precision=4))
+    if route == 'IV':
+        cols = ['Group', 'Subject', 'Sex', 'Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 'AUC_%extrap', 't1/2', 'Cl', 'Vz', 'Vss', 'MRT_inf', 'Lambda_z', 'R2_lz']
+    else: # Oral
+        cols = ['Group', 'Subject', 'Sex', 'Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 'AUC_%extrap', 't1/2', 'Cl_F', 'Vz_F', 'Vss', 'MRT_inf', 'Lambda_z', 'R2_lz']
+    
+    # Filter columns that actually exist in nca_df
+    display_cols = [col for col in cols if col in nca_df.columns]
+    st.dataframe(nca_df[display_cols].style.format(precision=4))
 
     # Download Results
     csv = nca_df.to_csv(index=False).encode('utf-8')
@@ -324,7 +427,17 @@ if mode == "NCA & Fitting":
     
     # New Oral Models
     def one_comp_oral(t, ka, ke, v_f, dose):
-        return (dose * ka / (v_f * (ka - ke))) * (np.exp(-ke * t) - np.exp(-ka * t))
+        # Handle t=0 for oral absorption phase
+        if isinstance(t, np.ndarray):
+            t_safe = np.where(t == 0, 1e-9, t) # Replace 0 with a small number
+        else:
+            t_safe = 1e-9 if t == 0 else t
+        
+        # Avoid division by zero if ka == ke
+        if np.isclose(ka, ke):
+            return (dose * ka / v_f) * t_safe * np.exp(-ke * t_safe)
+        else:
+            return (dose * ka / (v_f * (ka - ke))) * (np.exp(-ke * t_safe) - np.exp(-ka * t_safe))
     
     def one_comp_oral_fit(t, ka, ke, v_f):
         # dose is captured from outer scope
@@ -355,7 +468,8 @@ if mode == "NCA & Fitting":
         if route == "IV":
             popt1, pcov1 = curve_fit(one_comp_iv, t_avg, c_avg, p0=[c_avg[0], 0.1], bounds=(0, np.inf), sigma=weights)
         else:
-            popt1, pcov1 = curve_fit(one_comp_oral_fit, t_avg, c_avg, p0=[1.0, 0.1, 10.0], bounds=(0, np.inf), sigma=weights)
+            # Initial guess for oral: ka > ke, V/F reasonable
+            popt1, pcov1 = curve_fit(one_comp_oral_fit, t_avg, c_avg, p0=[1.0, 0.1, 10.0], bounds=([0.001, 0.001, 0.001], [np.inf, np.inf, np.inf]), sigma=weights)
         
         func1 = one_comp_iv if route == "IV" else one_comp_oral_fit
         rss = np.sum((c_avg - func1(t_avg, *popt1))**2)
@@ -450,8 +564,8 @@ if mode == "NCA & Fitting":
         
         # Pulling some params for interpretation
         nca_g = nca_df[nca_df['Group'] == selected_group_res]
-        avg_hl = nca_g['Half_life'].mean()
-        avg_r2 = nca_g['R2_adj'].mean()
+        avg_hl = nca_g['t1/2'].mean() # Changed to t1/2
+        avg_r2 = nca_g['R2_lz'].mean() # Changed to R2_lz
         
         insight_text = ""
         if avg_r2 > 0.95: insight_text += "✅ **High reliability**: Terminal phase fitting is excellent ($R^2 > 0.95$).\n"
@@ -593,20 +707,30 @@ elif mode == "PK/PD Correlation":
         ax_hys.plot(cp, effect, color=color, label=f"Dose {dose}")
         
         # Summary Params
-        cmax = np.max(cp)
-        auc = trapezoid(cp, sol.t)
-        emax_obs = np.max(effect)
+        cmax_sim = np.max(cp)
+        tmax_sim = sol.t[np.argmax(cp)]
+        auc_sim = trapezoid(cp, sol.t)
+        
+        # PD Metrics
+        peak_eff = np.max(effect)
         teff_max = sol.t[np.argmax(effect)]
+        auec = trapezoid(effect, sol.t)
+        e0 = effect[0]
+        
+        all_results.append({
+            'Dose': dose, 'Cmax': cmax_sim, 'Tmax': tmax_sim, 'AUC': auc_sim,
+            'Peak_Effect': peak_eff, 'Teff_max': teff_max, 'AUEC': auec, 'E0': e0
+        })
         
         summary_data.append({
             'Dose': dose,
-            'Cmax': cmax,
-            'AUC': auc,
-            'Peak_Effect': emax_obs,
+            'Cmax': cmax_sim,
+            'AUC': auc_sim,
+            'Peak_Effect': peak_eff,
             'T_eff_max': teff_max,
-            'Cmax/Dose': cmax / dose,
-            'AUC/Dose': auc / dose,
-            'Effect/Dose': emax_obs / dose
+            'Cmax/Dose': cmax_sim / dose,
+            'AUC/Dose': auc_sim / dose,
+            'Effect/Dose': peak_eff / dose
         })
 
     # Finalize PK Plot
@@ -764,6 +888,15 @@ elif mode == "Dose-Response & PD Modeling":
         st.subheader("💡 Intelligent PD Model Recommendation")
         c_vals = avg_data['Effect'].values
         conc_vals = avg_data['Concentration'].values
+        
+        # AUEC for each group
+        st.write("**PD Area Under Effect Curve (AUEC) & Baseline (E0)**")
+        pd_sum_metrics = pd_data.groupby('Group').apply(lambda x: pd.Series({
+            'AUEC_last': trapezoid(x.sort_values('Time')['Effect'], x.sort_values('Time')['Time']),
+            'E0': x.sort_values('Time')['Effect'].iloc[0],
+            'Teff_max': x.sort_values('Time')['Time'].iloc[np.argmax(x.sort_values('Time')['Effect'])]
+        })).reset_index()
+        st.dataframe(pd_sum_metrics.style.format(precision=2))
         
         pd_rec_results = {}
         # Try Emax
