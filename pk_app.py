@@ -141,6 +141,19 @@ def pk_pd_link_model_ode(t, y, params):
     
     return [dAc_dt, dCe_dt]
 
+def pk_mm_iv_ode(t, y, vmax, km, vd):
+    A = y[0]
+    C = A / vd
+    dAdt = -(vmax * C) / (km + C)
+    return [dAdt]
+
+def pk_mm_oral_ode(t, y, ka, vmax, km, vd):
+    Agut, Acentral = y
+    c_central = Acentral / vd
+    dAgut = -ka * Agut
+    dAcentral = ka * Agut - (vmax * c_central) / (km + c_central)
+    return [dAgut, dAcentral]
+
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Analysis Settings")
 mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation", "Population Analysis"])
@@ -258,8 +271,19 @@ if mode == "NCA & Fitting":
     def one_comp_oral_fit(t, ka, ke, v_f):
         # dose is captured from outer scope
         return one_comp_oral(t, ka, ke, v_f, g_dose)
+
+    # Nonlinear MM Fit Wrappers
+    def mm_iv_fit(t_eval, vmax, km, vd):
+        y0 = [g_dose]
+        sol = solve_ivp(pk_mm_iv_ode, (0, max(t_eval)), y0, t_eval=t_eval, args=(vmax, km, vd))
+        return sol.y[0] / vd if sol.success else np.full_like(t_eval, 1e-6)
+
+    def mm_oral_fit(t_eval, ka, vmax, km, vd):
+        y0 = [g_dose, 0]
+        sol = solve_ivp(pk_mm_oral_ode, (0, max(t_eval)), y0, t_eval=t_eval, args=(ka, vmax, km, vd))
+        return sol.y[1] / vd if sol.success else np.full_like(t_eval, 1e-6)
     
-    st.write(f"Analyzing **{selected_group_res}** to find the best fit (1-Comp vs 2-Comp)...")
+    st.write(f"Analyzing **{selected_group_res}** (Dose: {g_dose}) to find the best fit...")
     
     best_model = "None"
     best_aic = float('inf')
@@ -300,6 +324,27 @@ if mode == "NCA & Fitting":
             rec_results['2-Comp'] = {'aic': aic, 'popt': popt2, 'func': two_comp_iv, 'cv': cv2}
         except: pass
 
+    # MM Nonlinear Try
+    try:
+        if route == "IV":
+            # Initial guess: Vmax ~ Dose/10, Km ~ AvgConc
+            popt3, pcov3 = curve_fit(mm_iv_fit, t_avg, c_avg, p0=[g_dose/2, np.mean(c_avg), 10.0], bounds=(0, [np.inf, np.inf, np.inf]), sigma=weights)
+            func3 = mm_iv_fit
+            p_names3 = ['Vmax', 'Km', 'Vd']
+        else:
+            popt3, pcov3 = curve_fit(mm_oral_fit, t_avg, c_avg, p0=[1.0, g_dose/2, np.mean(c_avg), 10.0], bounds=(0, [np.inf, np.inf, np.inf, np.inf]), sigma=weights)
+            func3 = mm_oral_fit
+            p_names3 = ['ka', 'Vmax', 'Km', 'Vd']
+            
+        rss = np.sum((c_avg - func3(t_avg, *popt3))**2)
+        aic = 2*len(popt3) + len(t_avg) * np.log(rss/len(t_avg))
+        perr3 = np.sqrt(np.diag(pcov3))
+        cv3 = (perr3 / popt3) * 100
+        rec_results['MM-Nonlinear'] = {'aic': aic, 'popt': popt3, 'func': func3, 'cv': cv3, 'pnames': p_names3}
+    except Exception as e:
+        # st.write(f"MM Fit Debug: {e}") # Keep quiet unless needed
+        pass
+
     if rec_results:
         best_model = min(rec_results, key=lambda x: rec_results[x]['aic'])
         st.success(f"✅ **Best Model Recommended: {best_model}** (Based on AIC)")
@@ -314,7 +359,11 @@ if mode == "NCA & Fitting":
         
         # Display Parameter Confidence
         st.write("📊 **Parameter Estimates & Reliability (WinNonlin Style)**")
-        param_names = ['C0', 'ke'] if best_model == '1-Comp' and route == 'IV' else (['ka', 'ke', 'V/F'] if best_model == '1-Comp' else ['A', 'alpha', 'B', 'beta'])
+        if best_model == 'MM-Nonlinear':
+            param_names = best_info['pnames']
+        else:
+            param_names = ['C0', 'ke'] if best_model == '1-Comp' and route == 'IV' else (['ka', 'ke', 'V/F'] if best_model == '1-Comp' else ['A', 'alpha', 'B', 'beta'])
+        
         perf_data = []
         for name, val, cv in zip(param_names, best_info['popt'], best_info['cv']):
             perf_data.append({'Parameter': name, 'Estimate': val, 'CV%': cv})
