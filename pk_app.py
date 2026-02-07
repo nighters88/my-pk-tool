@@ -202,6 +202,12 @@ def pk_pd_link_model_ode(t, y, params):
     
     return [dAc_dt, dCe_dt]
 
+# PD Model Library (Direct models)
+def pd_linear(c, slope): return slope * c
+def pd_emax(c, emax, ec50): return (emax * c) / (ec50 + c)
+def pd_sigmoid(c, emax, ec50, gamma): return (emax * (c**gamma)) / (ec50**gamma + c**gamma)
+def pd_inhibitory(c, e0, imax, ic50): return e0 * (1 - (imax * c) / (ic50 + c))
+
 def pk_mm_iv_ode(t, y, vmax, km, vd):
     A = y[0]
     C = A / vd
@@ -217,7 +223,7 @@ def pk_mm_oral_ode(t, y, ka, vmax, km, vd):
 
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Analysis Settings")
-mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation", "Population Analysis"])
+mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation", "Population Analysis", "Dose-Response & PD Modeling"])
 route = st.sidebar.radio("Route", ["IV", "Oral"])
 
 if mode == "NCA & Fitting":
@@ -722,6 +728,110 @@ elif mode == "PK/PD Correlation":
     st.pyplot(fig_pop)
     
     st.success(f"✅ Simulation Complete for N={n_subj_actual} subjects with IIV (Cl CV {cv_cl}%, V CV {cv_v}%).")
+
+elif mode == "Dose-Response & PD Modeling":
+    st.subheader("🎯 Dose-Response & Advanced PD Modeling")
+    st.info("다양한 PD 모델을 비교하고 용량-반응(Dose-Response) 관계를 Hill equation으로 분석합니다.")
+    
+    # Example Data Generation (Direct PD)
+    def generate_pd_3x3_example():
+        doses = [10, 30, 100]
+        times = [0, 0.5, 1, 2, 4, 8, 12, 24]
+        data = []
+        for i, d in enumerate(doses):
+            grp = f"{d} mg"
+            for s in range(3):
+                sub = f"S{i*3+s+1}"
+                v_i, cl_i = 10.0, 1.0
+                emax_i, ec50_i = 100 * np.exp(np.random.normal(0, 0.05)), 20 * np.exp(np.random.normal(0, 0.05))
+                for t in times:
+                    cp = (d/v_i) * np.exp(-(cl_i/v_i)*t)
+                    eff = (emax_i * cp) / (ec50_i + cp) * np.exp(np.random.normal(0, 0.02))
+                    data.append({'Group': grp, 'Subject': sub, 'Dose': d, 'Time': t, 'Concentration': round(cp, 3), 'Effect': round(eff, 3)})
+        return pd.DataFrame(data)
+
+    if 'pd_manual' not in st.session_state or st.sidebar.button("🔄 Reset PD Example"):
+        st.session_state['pd_manual'] = generate_pd_3x3_example()
+    
+    pd_data = st.data_editor(st.session_state['pd_manual'], use_container_width=True)
+    st.session_state['pd_manual'] = pd_data
+    
+    if not pd_data.empty:
+        # Aggregation
+        avg_data = pd_data.groupby(['Group', 'Time']).agg({'Concentration': 'mean', 'Effect': 'mean', 'Dose': 'first'}).reset_index()
+        
+        # 1. PD Model Recommendation
+        st.subheader("💡 Intelligent PD Model Recommendation")
+        c_vals = avg_data['Effect'].values
+        conc_vals = avg_data['Concentration'].values
+        
+        pd_rec_results = {}
+        # Try Emax
+        try:
+            popt_e, pcov_e = curve_fit(pd_emax, conc_vals, c_vals, p0=[max(c_vals), np.median(conc_vals)], bounds=(0, np.inf))
+            rss = np.sum((c_vals - pd_emax(conc_vals, *popt_e))**2)
+            aic = 2*2 + len(c_vals)*np.log(rss/len(c_vals))
+            pd_rec_results['Emax'] = {'aic': aic, 'popt': popt_e, 'func': pd_emax, 'name': ['Emax', 'EC50']}
+        except: pass
+        
+        # Try Sigmoid
+        try:
+            popt_s, pcov_s = curve_fit(pd_sigmoid, conc_vals, c_vals, p0=[max(c_vals), np.median(conc_vals), 1.0], bounds=(0, np.inf))
+            rss = np.sum((c_vals - pd_sigmoid(conc_vals, *popt_s))**2)
+            aic = 2*3 + len(c_vals)*np.log(rss/len(c_vals))
+            pd_rec_results['Sigmoid'] = {'aic': aic, 'popt': popt_s, 'func': pd_sigmoid, 'name': ['Emax', 'EC50', 'Gamma']}
+        except: pass
+        
+        # Try Linear
+        try:
+            popt_l, pcov_l = curve_fit(pd_linear, conc_vals, c_vals, p0=[1.0], bounds=(0, np.inf))
+            rss = np.sum((c_vals - pd_linear(conc_vals, *popt_l))**2)
+            aic = 2*1 + len(c_vals)*np.log(rss/len(c_vals))
+            pd_rec_results['Linear'] = {'aic': aic, 'popt': popt_l, 'func': pd_linear, 'name': ['Slope']}
+        except: pass
+
+        if pd_rec_results:
+            best_pd = min(pd_rec_results, key=lambda x: pd_rec_results[x]['aic'])
+            st.success(f"✅ **Best PD Model: {best_pd}**")
+            
+            # Display Params
+            b_info = pd_rec_results[best_pd]
+            p_df = pd.DataFrame({'Parameter': b_info['name'], 'Estimate': b_info['popt']})
+            st.table(p_df.set_index('Parameter'))
+
+            # Plots
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Conc vs. Effect (PD Model)**")
+                fig_pd, ax_pd = plt.subplots()
+                # Sort for smooth line
+                c_range = np.linspace(min(conc_vals), max(conc_vals), 100)
+                ax_pd.scatter(conc_vals, c_vals, color='blue', alpha=0.5, label='Observed')
+                ax_pd.plot(c_range, b_info['func'](c_range, *b_info['popt']), 'r-', label=f'Fit: {best_pd}')
+                ax_pd.set_xlabel("Concentration")
+                ax_pd.set_ylabel("Effect")
+                ax_pd.legend()
+                st.pyplot(fig_pd)
+
+            with col2:
+                st.write("**Dose vs. Response (Hill Analysis)**")
+                # Dose-Response analysis (Peak Effect vs Dose)
+                dr_data = pd_data.groupby('Group').agg({'Dose': 'first', 'Effect': 'max'}).reset_index()
+                dr_data = dr_data.sort_values('Dose')
+                
+                fig_dr, ax_dr = plt.subplots()
+                ax_dr.scatter(dr_data['Dose'], dr_data['Effect'], color='green', s=100)
+                ax_dr.plot(dr_data['Dose'], dr_data['Effect'], 'g--')
+                ax_dr.set_xlabel("Dose (mg)")
+                ax_dr.set_ylabel("Peak Effect")
+                ax_dr.set_xscale('log')
+                st.pyplot(fig_dr)
+                
+                # Hill Fit for Dose-Response
+                try:
+                    popt_dr, _ = curve_fit(pd_emax, dr_data['Dose'], dr_data['Effect'], p0=[max(dr_data['Effect']), np.median(dr_data['Dose'])])
+                    st.write(f"📈 **Dose-Response Hill Fit**: $ED_{{50}}$ = {popt_dr[1]:.2f} mg")
+                except: pass
 
 st.divider()
 st.caption("Developed by Antigravity PK Engine | Automatic Updates via GitHub")
