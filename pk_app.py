@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from scipy.integrate import solve_ivp, trapezoid
+from scipy.stats import linregress
 import io
 
 # --- Page Config ---
