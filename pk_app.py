@@ -101,7 +101,24 @@ def calculate_single_nca(time, concentration, dose=1, route='Oral', method='Line
     return params
 
 # --- ODE Models ---
-# ... (기존 tmdd_model_ode 유지)
+def tmdd_model_ode(t, y, params):
+    """
+    Standard TMDD Model ODEs:
+    y = [Free_Drug (L), Free_Target (R), Complex (LR)]
+    """
+    L, R, LR = y
+    kel = params.get('kel', 0.01)
+    kon = params.get('kon', 0.1)
+    koff = params.get('koff', 0.01)
+    kint = params.get('kint', 0.05)
+    ksyn = params.get('ksyn', 1.0)
+    kdeg = params.get('kdeg', 0.1)
+    
+    dLdt = -kel * L - kon * L * R + koff * LR
+    dRdt = ksyn - kdeg * R - kon * L * R + koff * LR
+    dLRdt = kon * L * R - koff * LR - kint * LR
+    
+    return [dLdt, dRdt, dLRdt]
 
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Analysis Settings")
@@ -298,6 +315,7 @@ elif mode == "TMDD Simulation":
         'ksyn': st.sidebar.slider("Target Syn (ksyn)", 0.1, 10.0, 1.0),
         'kdeg': st.sidebar.slider("Target Deg (kdeg)", 0.01, 0.5, 0.1)
     }
+    dose = st.sidebar.number_input("Dose (nM)", value=100.0)
     t_end = st.sidebar.number_input("End Time (hr)", value=168)
 
     # Simulation
