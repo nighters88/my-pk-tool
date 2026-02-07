@@ -76,20 +76,44 @@ route = st.sidebar.radio("Route", ["IV", "Oral"])
 dose = st.sidebar.number_input("Dose (Unit)", value=100.0)
 
 if mode == "NCA & Fitting":
-    st.sidebar.subheader("Visualization")
+    st.sidebar.subheader("Data Input")
+    input_method = st.sidebar.radio("Input Method", ["Manual Entry", "Upload CSV"])
     show_log = st.sidebar.checkbox("Log Scale", value=True)
     
-    uploaded_file = st.sidebar.file_uploader("Upload PK Data (CSV)", type="csv")
-    if uploaded_file is not None:
-        data = pd.read_csv(uploaded_file)
+    if input_method == "Upload CSV":
+        uploaded_file = st.sidebar.file_uploader("Upload PK Data (CSV)", type="csv")
+        if uploaded_file is not None:
+            data = pd.read_csv(uploaded_file)
+        else:
+            st.info("Using default sample data. Upload your CSV to analyze.")
+            data = pd.DataFrame({
+                'Subject': ['S1']*5 + ['S2']*5,
+                'Time': [0, 1, 4, 8, 24]*2,
+                'Concentration': [100, 60, 25, 12, 2, 95, 58, 22, 10, 1.5]
+            })
     else:
-        st.info("Using default sample data. Upload your CSV to analyze.")
-        # Default sample data
-        data = pd.DataFrame({
-            'Subject': ['S1']*5 + ['S2']*5,
-            'Time': [0, 1, 4, 8, 24]*2,
-            'Concentration': [100, 60, 25, 12, 2, 95, 58, 22, 10, 1.5]
-        })
+        st.sidebar.info("Edit the table below to update values.")
+        # Initial template for manual entry
+        if 'manual_data' not in st.session_state:
+            st.session_state['manual_data'] = pd.DataFrame({
+                'Subject': ['Subject 1']*6,
+                'Time': [0.0, 1.0, 2.0, 4.0, 8.0, 24.0],
+                'Concentration': [100.0, 80.0, 60.0, 40.0, 20.0, 5.0]
+            })
+        
+        # Use data_editor for direct manipulation
+        st.subheader("✍️ Data Editor (Time-Concentration Profile)")
+        data = st.data_editor(
+            st.session_state['manual_data'],
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "Time": st.column_config.NumberColumn("Time (hr)", min_value=0, format="%.2f"),
+                "Concentration": st.column_config.NumberColumn("Conc (ng/mL)", min_value=0, format="%.2f"),
+                "Subject": st.column_config.TextColumn("Subject ID")
+            }
+        )
+        st.session_state['manual_data'] = data
 
     # Execution
     st.subheader("📊 PK Profile & Results")
