@@ -463,6 +463,14 @@ if mode == "NCA & Fitting":
 
 elif mode == "TMDD Simulation":
     st.sidebar.subheader("TMDD Parameters")
+    params = {
+        'kel': st.sidebar.slider("Elimination (kel)", 0.001, 0.5, 0.02),
+        'kon': st.sidebar.slider("On-rate (kon)", 0.01, 2.0, 0.1),
+        'koff': st.sidebar.slider("Off-rate (koff)", 0.001, 0.5, 0.01),
+        'kint': st.sidebar.slider("Internalization (kint)", 0.001, 0.5, 0.05),
+        'ksyn': st.sidebar.slider("Target Syn (ksyn)", 0.1, 10.0, 1.0),
+        'kdeg': st.sidebar.slider("Target Deg (kdeg)", 0.01, 0.5, 0.1)
+    }
     t_end = st.sidebar.number_input("End Time (hr)", value=168)
 
     st.subheader("✍️ TMDD Observation Data Editor (3x3 Professional Template)")
