@@ -120,9 +120,30 @@ def tmdd_model_ode(t, y, params):
     
     return [dLdt, dRdt, dLRdt]
 
+def pk_pd_link_model_ode(t, y, params):
+    """
+    1-Compartment PK + Effect Compartment (Link Model)
+    y = [Central_Amt, Effect_Conc]
+    """
+    Ac, Ce = y
+    vd = params.get('Vd', 10.0)
+    cl = params.get('Cl', 1.0)
+    keo = params.get('keo', 0.1)
+    
+    cp = Ac / vd
+    
+    # PK: Central Compartment
+    ke = cl / vd
+    dAc_dt = -ke * Ac
+    
+    # Link: Effect Compartment
+    dCe_dt = keo * (cp - Ce)
+    
+    return [dAc_dt, dCe_dt]
+
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Analysis Settings")
-mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation"])
+mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation"])
 route = st.sidebar.radio("Route", ["IV", "Oral"])
 
 if mode == "NCA & Fitting":
@@ -343,6 +364,122 @@ elif mode == "TMDD Simulation":
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     st.pyplot(fig)
+
+elif mode == "PK/PD Correlation":
+    st.sidebar.subheader("PK Parameters")
+    vd = st.sidebar.number_input("Volume (Vd, L)", value=10.0)
+    cl = st.sidebar.number_input("Clearance (Cl, L/hr)", value=1.0)
+    dose_input = st.sidebar.text_input("Doses (separated by comma)", value="10, 50, 200")
+    
+    st.sidebar.subheader("PD Parameters (Sigmoid Emax)")
+    emax = st.sidebar.number_input("Emax", value=100.0)
+    ec50 = st.sidebar.number_input("EC50", value=20.0)
+    gamma = st.sidebar.slider("Hill Coefficient (gamma)", 0.5, 5.0, 1.0)
+    keo = st.sidebar.slider("Equilibrium (keo, 1/hr)", 0.01, 2.0, 0.2)
+    
+    t_end = st.sidebar.number_input("Simulation Time (hr)", value=48)
+    dose_norm = st.sidebar.checkbox("Dose-Normalized Scale (C/Dose, E/Dose)", value=False)
+
+    # Parse doses
+    try:
+        doses = [float(d.strip()) for d in dose_input.split(',')]
+    except:
+        st.error("Invalid dose input. Using default [10, 50, 200].")
+        doses = [10, 50, 200]
+
+    all_results = []
+    
+    st.subheader("📊 PK/PD Simulation Results")
+    
+    fig_pkpd, (ax_pk, ax_pd) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+    fig_corr, (ax_prop, ax_hys) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    colors = plt.cm.viridis(np.linspace(0, 0.8, len(doses)))
+    
+    summary_data = []
+
+    for dose, color in zip(doses, colors):
+        params = {'Vd': vd, 'Cl': cl, 'keo': keo}
+        y0 = [dose, 0] # Central Amt, Effect Conc
+        t_span = (0, t_end)
+        t_eval = np.linspace(0, t_end, 1000)
+        
+        sol = solve_ivp(pk_pd_link_model_ode, t_span, y0, t_eval=t_eval, args=(params,), method='RK45')
+        
+        cp = sol.y[0] / vd
+        ce = sol.y[1]
+        effect = (emax * (ce**gamma)) / (ec50**gamma + ce**gamma)
+        
+        # Scaling for dose normalization
+        scale = dose if dose_norm else 1.0
+        
+        # Plot PK
+        ax_pk.plot(sol.t, cp / scale, color=color, label=f"Dose {dose}")
+        # Plot PD
+        ax_pd.plot(sol.t, effect / scale, color=color, ls='--', label=f"Eff (Dose {dose})")
+        
+        # Hysteresis
+        ax_hys.plot(cp, effect, color=color, label=f"Dose {dose}")
+        
+        # Summary Params
+        cmax = np.max(cp)
+        auc = np.trapz(cp, sol.t)
+        emax_obs = np.max(effect)
+        teff_max = sol.t[np.argmax(effect)]
+        
+        summary_data.append({
+            'Dose': dose,
+            'Cmax': cmax,
+            'AUC': auc,
+            'Peak_Effect': emax_obs,
+            'T_eff_max': teff_max,
+            'Cmax/Dose': cmax / dose,
+            'AUC/Dose': auc / dose,
+            'Effect/Dose': emax_obs / dose
+        })
+
+    # Finalize PK Plot
+    ax_pk.set_ylabel("Conc (ng/mL) / Dose" if dose_norm else "Conc (ng/mL)")
+    ax_pk.set_title("PK: Plasma Concentration Over Time")
+    ax_pk.legend()
+    ax_pk.grid(True, alpha=0.3)
+    
+    # Finalize PD Plot
+    ax_pd.set_ylabel("Effect / Dose" if dose_norm else "Effect (Units)")
+    ax_pd.set_xlabel("Time (hr)")
+    ax_pd.set_title("PD: Drug Effect Over Time")
+    ax_pd.legend()
+    ax_pd.grid(True, alpha=0.3)
+    
+    st.pyplot(fig_pkpd)
+    
+    # Dose Proportionality Plot
+    sum_df = pd.DataFrame(summary_data)
+    ax_prop.plot(sum_df['Dose'], sum_df['AUC'], 'o-', label="AUC")
+    ax_prop.plot(sum_df['Dose'], sum_df['Cmax'], 's-', label="Cmax")
+    ax_prop.set_xlabel("Dose")
+    ax_prop.set_ylabel("PK Parameter")
+    ax_prop_pd = ax_prop.twinx()
+    ax_prop_pd.plot(sum_df['Dose'], sum_df['Peak_Effect'], '^-', color='red', label="Peak Effect")
+    ax_prop_pd.set_ylabel("Peak Effect", color='red')
+    ax_prop.set_title("Dose Proportionality")
+    ax_prop.legend(loc='upper left')
+    ax_prop_pd.legend(loc='upper right')
+    ax_prop.grid(True, alpha=0.3)
+    
+    # Hysteresis Plot
+    ax_hys.set_xlabel("Concentration (Cp)")
+    ax_hys.set_ylabel("Effect (E)")
+    ax_hys.set_title("Hysteresis Loop (Cp vs E)")
+    ax_hys.legend()
+    ax_hys.grid(True, alpha=0.3)
+    
+    st.subheader("📉 Dose Response & Hysteresis")
+    st.pyplot(fig_corr)
+    
+    # Summary Table
+    st.subheader("📋 PK/PD Parameter Summary")
+    st.dataframe(sum_df.style.format(precision=2), use_container_width=True)
 
 st.divider()
 st.caption("Developed by Antigravity PK Engine | Automatic Updates via GitHub")
