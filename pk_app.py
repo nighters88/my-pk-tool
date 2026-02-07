@@ -20,6 +20,67 @@ PK_UNITS = {
     't1/2_alpha': 'hr', 't1/2_beta': 'hr'
 }
 
+def generate_3x3_example(route="IV"):
+    """3 Dose levels, N=3 subjects per dose (Total 9)"""
+    doses = [10, 30, 100]
+    times = [0, 0.5, 1, 2, 4, 8, 12, 24] if route == "IV" else [0, 0.5, 1, 2, 4, 8, 12, 24, 48]
+    data = []
+    
+    # Simple PK models for generating 'realistic' noise data
+    def iv_1c(t, d, v, cl): return (d/v) * np.exp(-(cl/v)*t)
+    def oral_1c(t, d, ka, v, cl): return (d*ka/(v*(ka-cl/v))) * (np.exp(-(cl/v)*t) - np.exp(-ka*t))
+    
+    for i, d in enumerate(doses):
+        grp = f"Group {i+1} ({d}mg)"
+        for s in range(3):
+            sub = f"S{i*3 + s + 1}"
+            # Add some variability
+            v_i = 10 * np.exp(np.random.normal(0, 0.1))
+            cl_i = 1 * np.exp(np.random.normal(0, 0.1))
+            ka_i = 1.5 * np.exp(np.random.normal(0, 0.1))
+            
+            for t in times:
+                if route == "IV":
+                    conc = iv_1c(t, d, v_i, cl_i)
+                else:
+                    conc = oral_1c(t, d, ka_i, v_i, cl_i)
+                
+                # Add assay noise (5% CV)
+                conc *= np.exp(np.random.normal(0, 0.05))
+                if t == 0 and route == "Oral": conc = 0
+                
+                data.append({
+                    'Group': grp, 'Subject': sub, 'Sex': 'M' if s%2==0 else 'F',
+                    'Dose': d, 'Time': t, 'Concentration': round(conc, 3)
+                })
+    return pd.DataFrame(data)
+
+def generate_3x3_tmdd_example():
+    """TMDD specific example with 3 doses and N=3"""
+    doses = [10, 50, 200]
+    times = [0, 1, 4, 8, 24, 48, 72, 120, 168]
+    data = []
+    # Base params for generation
+    params = {'kel': 0.02, 'kon': 0.1, 'koff': 0.01, 'kint': 0.05, 'ksyn': 1.0, 'kdeg': 0.1}
+    R0 = params['ksyn'] / params['kdeg']
+    
+    for i, d in enumerate(doses):
+        grp = f"Dose {d}nm"
+        for s in range(3):
+            sub = f"Subj_{i*3+s+1}"
+            # Subject specific noise
+            p_i = {k: v * np.exp(np.random.normal(0, 0.05)) for k, v in params.items()}
+            y0 = [d, R0, 0]
+            sol = solve_ivp(tmdd_model_ode, (0, 168), y0, t_eval=times, args=(p_i,))
+            for j, t in enumerate(times):
+                data.append({
+                    'Group': grp, 'Subject': sub, 'Dose': d, 'Time': t,
+                    'Concentration': round(sol.y[0][j] * np.exp(np.random.normal(0, 0.05)), 3),
+                    'Free_Target': round(sol.y[1][j], 3),
+                    'Complex': round(sol.y[2][j], 3)
+                })
+    return pd.DataFrame(data)
+
 # --- Core Analysis Functions (Consolidated from Prototype) ---
 def calculate_auc_aumc_interval(t1, t2, c1, c2, method='Linear-up Log-down', tmax=None):
     dt = t2 - t1
@@ -170,29 +231,20 @@ if mode == "NCA & Fitting":
             data = pd.read_csv(uploaded_file)
         else:
             st.info("Using default sample data.")
-            data = pd.DataFrame({
-                'Group': ['G1']*10 + ['G2']*10,
-                'Subject': ['S1','S2','S3','S4','S5']*4,
-                'Sex': ['M','F','M','F','M']*4,
-                'Dose': [100]*10 + [300]*10,
-                'Time': [0, 1, 4, 8, 24]*4,
-                'Concentration': [100, 60, 25, 12, 2, 95, 58, 22, 10, 1.5, 305, 180, 75, 35, 6, 290, 175, 70, 30, 5]
-            })
+            if 'nca_example' not in st.session_state:
+                st.session_state['nca_example'] = generate_3x3_example(route)
+            data = st.session_state['nca_example']
     else:
-        st.sidebar.info("WinNonlin 스타일로 여러 개체(N)의 데이터를 입력하세요.")
-        if 'manual_data' not in st.session_state:
-            st.session_state['manual_data'] = pd.DataFrame({
-                'Group': ['Test Group']*6,
-                'Subject': ['S1']*6,
-                'Sex': ['M']*6,
-                'Dose': [100.0]*6,
-                'Time': [0.0, 1.0, 2.0, 4.0, 8.0, 24.0],
-                'Concentration': [100.0, 80.0, 60.0, 40.0, 20.0, 5.0]
-            })
+        st.sidebar.info("3 Dose levels, N=3 per dose 전문 예시 데이터입니다.")
+        load_ex = st.sidebar.button("🔄 Reset to Professional Example (3x3)")
         
-        st.subheader("✍️ Advanced Data Editor (WinNonlin Table Style)")
+        default_df = generate_3x3_example(route)
+        if 'nca_manual' not in st.session_state or load_ex:
+            st.session_state['nca_manual'] = default_df
+        
+        st.subheader("✍️ Advanced Data Editor (Reactive Updates)")
         data = st.data_editor(
-            st.session_state['manual_data'],
+            st.session_state['nca_manual'],
             num_rows="dynamic",
             use_container_width=True,
             column_config={
@@ -203,7 +255,7 @@ if mode == "NCA & Fitting":
                 "Sex": st.column_config.SelectboxColumn("Sex", options=["M", "F", "N/A"])
             }
         )
-        st.session_state['manual_data'] = data
+        st.session_state['nca_manual'] = data
 
     # Statistical Aggregation
     st.subheader("📊 PK Profile & Group Statistics")
@@ -411,37 +463,53 @@ if mode == "NCA & Fitting":
 
 elif mode == "TMDD Simulation":
     st.sidebar.subheader("TMDD Parameters")
-    params = {
-        'kel': st.sidebar.slider("Elimination (kel)", 0.001, 0.5, 0.02),
-        'kon': st.sidebar.slider("On-rate (kon)", 0.01, 2.0, 0.1),
-        'koff': st.sidebar.slider("Off-rate (koff)", 0.001, 0.5, 0.01),
-        'kint': st.sidebar.slider("Internalization (kint)", 0.001, 0.5, 0.05),
-        'ksyn': st.sidebar.slider("Target Syn (ksyn)", 0.1, 10.0, 1.0),
-        'kdeg': st.sidebar.slider("Target Deg (kdeg)", 0.01, 0.5, 0.1)
-    }
-    dose = st.sidebar.number_input("Dose (nM)", value=100.0)
     t_end = st.sidebar.number_input("End Time (hr)", value=168)
 
-    # Simulation
+    st.subheader("✍️ TMDD Observation Data Editor (3x3 Professional Template)")
+    if 'tmdd_manual' not in st.session_state:
+        st.session_state['tmdd_manual'] = generate_3x3_tmdd_example()
+    
+    if st.sidebar.button("🔄 Reset TMDD Example"):
+        st.session_state['tmdd_manual'] = generate_3x3_tmdd_example()
+        
+    data = st.data_editor(
+        st.session_state['tmdd_manual'],
+        num_rows="dynamic",
+        use_container_width=True
+    )
+    st.session_state['tmdd_manual'] = data
+
+    # Simulation logic using parameters and THE FIRST dose from the table as a reference, 
+    # but the plot will show ALL data points from the table.
+    primary_dose = data['Dose'].iloc[0] if not data.empty else 100
     R0 = params['ksyn'] / params['kdeg']
-    y0 = [dose, R0, 0]
+    y0 = [primary_dose, R0, 0]
     t_span = (0, t_end)
     t_eval = np.linspace(0, t_end, 500)
     sol = solve_ivp(tmdd_model_ode, t_span, y0, t_eval=t_eval, args=(params,), method='RK45')
     
-    # Plotly or Matplotlib
-    st.subheader("📉 TMDD & RO Projection")
+    # Plotting
+    st.subheader("📉 TMDD Simulation & Observations")
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
-    ax1.plot(sol.t, sol.y[0], label="Free Drug (L)")
-    ax1.plot(sol.t, sol.y[1], label="Free Target (R)")
-    ax1.plot(sol.t, sol.y[2], label="Complex (LR)")
+    
+    # Simulation Lines
+    ax1.plot(sol.t, sol.y[0], 'k-', alpha=0.5, label="Sim: Free Drug (L)")
+    
+    # Observation Points from Editor
+    groups = data['Group'].unique()
+    colors = plt.cm.tab10(np.linspace(0, 1, len(groups)))
+    for g, color in zip(groups, colors):
+        g_data = data[data['Group'] == g]
+        ax1.scatter(g_data['Time'], g_data['Concentration'], color=color, label=f"Obs: {g}", alpha=0.7)
+        ax1.plot(g_data['Time'], g_data['Concentration'], '--', color=color, alpha=0.3)
+
     ax1.set_yscale('log')
     ax1.set_ylabel("Conc (nM)")
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
     ro = (sol.y[2] / (sol.y[1] + sol.y[2])) * 100
-    ax2.plot(sol.t, ro, color='black', label="Receptor Occupancy")
+    ax2.plot(sol.t, ro, color='black', label="Sim: Receptor Occupancy")
     ax2.set_ylabel("RO (%)")
     ax2.set_ylim(0, 105)
     ax2.legend()
@@ -452,7 +520,6 @@ elif mode == "PK/PD Correlation":
     st.sidebar.subheader("PK Parameters")
     vd = st.sidebar.number_input("Volume (Vd, L)", value=10.0)
     cl = st.sidebar.number_input("Clearance (Cl, L/hr)", value=1.0)
-    dose_input = st.sidebar.text_input("Doses (separated by comma)", value="10, 50, 200")
     
     st.sidebar.subheader("PD Parameters (Sigmoid Emax)")
     emax = st.sidebar.number_input("Emax", value=100.0)
@@ -463,12 +530,15 @@ elif mode == "PK/PD Correlation":
     t_end = st.sidebar.number_input("Simulation Time (hr)", value=48)
     dose_norm = st.sidebar.checkbox("Dose-Normalized Scale (C/Dose, E/Dose)", value=False)
 
-    # Parse doses
-    try:
-        doses = [float(d.strip()) for d in dose_input.split(',')]
-    except:
-        st.error("Invalid dose input. Using default [10, 50, 200].")
-        doses = [10, 50, 200]
+    st.subheader("✍️ PK/PD Study Data Editor (3x3 Professional Template)")
+    if 'pkpd_manual' not in st.session_state or st.sidebar.button("🔄 Reset PK/PD Example"):
+        st.session_state['pkpd_manual'] = generate_3x3_example(route)
+        
+    data = st.data_editor(st.session_state['pkpd_manual'], num_rows="dynamic", use_container_width=True)
+    st.session_state['pkpd_manual'] = data
+
+    # Use unique doses from table to drive simulation lines
+    doses = sorted(data['Dose'].unique())
 
     all_results = []
     
@@ -497,9 +567,13 @@ elif mode == "PK/PD Correlation":
         scale = dose if dose_norm else 1.0
         
         # Plot PK
-        ax_pk.plot(sol.t, cp / scale, color=color, label=f"Dose {dose}")
+        ax_pk.plot(sol.t, cp / scale, color=color, label=f"Sim Dose {dose}")
+        # Plot points from data table
+        dose_data = data[data['Dose'] == dose]
+        ax_pk.scatter(dose_data['Time'], dose_data['Concentration'] / scale, color=color, alpha=0.6, label=f"Obs Dose {dose}")
+        
         # Plot PD
-        ax_pd.plot(sol.t, effect / scale, color=color, ls='--', label=f"Eff (Dose {dose})")
+        ax_pd.plot(sol.t, effect / scale, color=color, ls='--', label=f"Sim Eff (Dose {dose})")
         
         # Hysteresis
         ax_hys.plot(cp, effect, color=color, label=f"Dose {dose}")
@@ -564,10 +638,30 @@ elif mode == "PK/PD Correlation":
     st.subheader("📋 PK/PD Parameter Summary")
     st.dataframe(sum_df.style.format(precision=2), use_container_width=True)
 
-elif mode == "Population Analysis":
     st.subheader("👨‍👩‍👧‍👦 Population PK Simulation (IIV)")
-    st.info("개인 간 변동성(Inter-Individual Variability)을 고려한 집단 PK 시뮬레이션입니다 (Monte Carlo method).")
+    st.info("개인 간 변동성(Inter-Individual Variability)을 고려한 집단 PK 시뮬레이션입니다.")
     
+    if 'pop_manual' not in st.session_state:
+        # Create a small population table
+        st.session_state['pop_manual'] = pd.DataFrame({
+            'Subject': [f'Subj_{i+1}' for i in range(9)],
+            'Dose': [10]*3 + [30]*3 + [100]*3,
+            'Cl_Baseline': [2.0]*9,
+            'V_Baseline': [20.0]*9
+        })
+    
+    if st.sidebar.button("🔄 Reset Pop Example"):
+        st.session_state['pop_manual'] = pd.DataFrame({
+            'Subject': [f'Subj_{i+1}' for i in range(9)],
+            'Dose': [10]*3 + [30]*3 + [100]*3,
+            'Cl_Baseline': [2.0]*9,
+            'V_Baseline': [20.0]*9
+        })
+        
+    st.subheader("✍️ Population Metadata Editor (3 Doses, N=3)")
+    pop_meta = st.data_editor(st.session_state['pop_manual'], use_container_width=True)
+    st.session_state['pop_manual'] = pop_meta
+
     col1, col2 = st.columns(2)
     with col1:
         st.write("**Model Parameters**")
@@ -579,27 +673,33 @@ elif mode == "Population Analysis":
         st.write("**Variability (CV%)**")
         cv_cl = st.slider("Cl Variability (CV%)", 0, 100, 30)
         cv_v = st.slider("V Variability (CV%)", 0, 100, 20)
-        n_subjects = st.select_slider("Number of Subjects", options=[10, 50, 100, 500], value=100)
 
     t_eval = np.linspace(0, 48, 100)
     pop_results = []
     
-    # Monte Carlo Logic
-    for i in range(n_subjects):
-        # Lognormal distribution for positive parameters
-        cl_i = pop_cl * np.exp(np.random.normal(0, cv_cl/100))
-        v_i = pop_v * np.exp(np.random.normal(0, cv_v/100))
+    # Simulation based on metadata table
+    for idx, row in pop_meta.iterrows():
+        # Apply variability to baseline values in table
+        cl_i = row['Cl_Baseline'] * np.exp(np.random.normal(0, cv_cl/100))
+        v_i = row['V_Baseline'] * np.exp(np.random.normal(0, cv_v/100))
         ke_i = cl_i / v_i
-        cp_i = (pop_dose / v_i) * np.exp(-ke_i * t_eval)
+        
+        if route == "IV":
+            cp_i = (row['Dose'] / v_i) * np.exp(-ke_i * t_eval)
+        else:
+            ka_i = 1.5 # Default ka for pop simulation
+            cp_i = (row['Dose'] * ka_i / (v_i * (ka_i - ke_i))) * (np.exp(-ke_i * t_eval) - np.exp(-ka_i * t_eval))
+            
         pop_results.append(cp_i)
     
     pop_array = np.array(pop_results)
+    n_subj_actual = len(pop_array)
     p5 = np.percentile(pop_array, 5, axis=0)
     p50 = np.percentile(pop_array, 50, axis=0)
     p95 = np.percentile(pop_array, 95, axis=0)
     
     fig_pop, ax_pop = plt.subplots(figsize=(10, 6))
-    for i in range(min(n_subjects, 50)): # Plot first 50 spaghetti lines
+    for i in range(min(n_subj_actual, 50)): # Plot first 50 spaghetti lines
         ax_pop.plot(t_eval, pop_array[i], color='gray', alpha=0.1)
     
     ax_pop.plot(t_eval, p50, 'r-', linewidth=2, label="Median (P50)")
