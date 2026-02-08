@@ -472,6 +472,7 @@ if mode == "NCA & Fitting":
         data = detect_outliers_iqr(data)
 
     # Plotly Individual Profiles
+    groups = data['Group'].unique()
     fig = px.line(data, x='Time', y='Concentration', color='Group', line_group='Subject',
                  hover_data=['Subject', 'Dose'], markers=True, 
                  title="Individual PK Profiles (Interactive)")
