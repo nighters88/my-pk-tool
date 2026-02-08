@@ -99,6 +99,63 @@ def calculate_auc_aumc_interval(t1, t2, c1, c2, method='Linear-up Log-down', tma
     aumc = (t1 * c1 + t2 * c2) / 2 * dt
     return auc, aumc
 
+def preprocess_blq(df, lloq, method='M1', max_consecutive_blq=2):
+    """
+    LLOQ (Lower Limit of Quantitation) 처리 로직
+    - M1: BLQ 값을 모두 제거
+    - M2: 첫 BLQ는 0으로 처리, 이후는 제거
+    - M4: BLQ를 LLOQ/2로 대체
+    - 연속 BLQ 처리: max_consecutive_blq 이상 연속 시 이후 데이터 Missing/Blank 처리
+    """
+    if lloq <= 0: return df
+    df = df.copy().sort_values('Time').reset_index(drop=True)
+    conc = df['Concentration'].values
+    blq_mask = conc < lloq
+    
+    # 연속 BLQ 감지
+    consecutive_count = 0
+    missing_start_idx = len(df)
+    for i, is_blq in enumerate(blq_mask):
+        if is_blq:
+            consecutive_count += 1
+        else:
+            consecutive_count = 0
+        
+        if consecutive_count >= max_consecutive_blq:
+            missing_start_idx = i # 현재 인덱스부터 missing 처리
+            break
+            
+    # missing_start_idx 이후 데이터 제거
+    df = df.iloc[:missing_start_idx].copy()
+    if df.empty: return df
+    
+    conc = df['Concentration'].values
+    blq_mask = conc < lloq
+    
+    if method == 'M1':
+        df = df[~blq_mask]
+    elif method == 'M2':
+        first_blq_done = False
+        keep_mask = []
+        new_concs = []
+        for i, val in enumerate(conc):
+            if val < lloq:
+                if not first_blq_done:
+                    new_concs.append(0.0)
+                    keep_mask.append(True)
+                    first_blq_done = True
+                else:
+                    keep_mask.append(False)
+            else:
+                new_concs.append(val)
+                keep_mask.append(True)
+        df = df[keep_mask].copy()
+        df['Concentration'] = new_concs
+    elif method == 'M4':
+        df.loc[blq_mask, 'Concentration'] = lloq / 2
+        
+    return df
+
 def auto_select_lambda_z(time, conc, tmax):
     """WinNonlin-style: 터미널 단계를 자동으로 탐지하여 최적의 Lambda_z 선택"""
     t_post_max = time[time >= tmax]
@@ -135,8 +192,13 @@ def auto_select_lambda_z(time, conc, tmax):
             
     return best_ke, best_r2, best_points
 
-def calculate_single_nca(time, concentration, dose=1, route='Oral', method='Linear-up Log-down'):
-    df = pd.DataFrame({'Time': time, 'Concentration': concentration}).sort_values('Time').reset_index(drop=True)
+def calculate_single_nca(time, concentration, dose=1, route='Oral', method='Linear-up Log-down', lloq=0, blq_method='M1'):
+    df_raw = pd.DataFrame({'Time': time, 'Concentration': concentration})
+    df = preprocess_blq(df_raw, lloq, method=blq_method)
+    
+    if df.empty:
+        return {k: np.nan for k in ['Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 't1/2', 'Cl', 'Vz', 'Vss', 'MRT_inf']}
+
     cmax = df['Concentration'].max()
     tmax = df.loc[df['Concentration'].idxmax(), 'Time']
     # Filter for valid terminal phase fitting (non-zero concentrations)
@@ -244,6 +306,56 @@ def tmdd_model_ode(t, y, params):
     
     return [dLdt, dRdt, dLRdt]
 
+def parent_metabolite_model_ode(t, y, params):
+    """
+    Parent (1-3 Comp) to Metabolite (1-2 Comp) Model
+    y = [Ap, Ap1, Ap2, Am, Am1]
+    """
+    n_p = params.get('n_p', 1) # Parent compartments
+    n_m = params.get('n_m', 1) # Metabolite compartments
+    
+    Ap = y[0]
+    Am = y[n_p]
+    
+    # Parent rates
+    kel_p = params.get('kel_p', 0.1)
+    k_pm = params.get('k_pm', 0.05) # Conversion to metabolite
+    
+    # Metabolite rates
+    kel_m = params.get('kel_m', 0.1)
+    
+    dAp = -(kel_p + k_pm) * Ap
+    dAm = k_pm * Ap - kel_m * Am
+    
+    dAp1 = dAp2 = dAm1 = 0
+    
+    # Multi-compartment Parent
+    if n_p >= 2:
+        Ap1 = y[1]
+        k12p, k21p = params.get('k12p', 0.05), params.get('k21p', 0.05)
+        dAp -= k12p * Ap - k21p * Ap1
+        dAp1 = k12p * Ap - k21p * Ap1
+    if n_p >= 3:
+        Ap2 = y[2]
+        k13p, k31p = params.get('k13p', 0.02), params.get('k31p', 0.02)
+        dAp -= k13p * Ap - k31p * Ap2
+        dAp2 = k13p * Ap - k31p * Ap2
+        
+    # Multi-compartment Metabolite
+    if n_m >= 2:
+        Am1 = y[n_p + 1]
+        k12m, k21m = params.get('k12m', 0.05), params.get('k21m', 0.05)
+        dAm -= k12m * Am - k21m * Am1
+        dAm1 = k12m * Am - k21m * Am1
+        
+    dydt = [dAp]
+    if n_p >= 2: dydt.append(dAp1)
+    if n_p == 3: dydt.append(dAp2)
+    dydt.append(dAm)
+    if n_m == 2: dydt.append(dAm1)
+    
+    return dydt
+
 def pk_pd_link_model_ode(t, y, params):
     """
     1-Compartment PK + Effect Compartment (Link Model)
@@ -286,9 +398,14 @@ def pk_mm_oral_ode(t, y, ka, vmax, km, vd):
 
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Analysis Settings")
-mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation", "Population Analysis", "Dose-Response & PD Modeling"])
+mode = st.sidebar.selectbox("Analysis Mode", ["NCA & Fitting", "TMDD Simulation", "PK/PD Correlation", "Population Analysis", "Dose-Response & PD Modeling", "Parent-Metabolite Modeling"])
 eval_type = st.sidebar.radio("Evaluation Context", ["Preclinical (TK/Linearity)", "Clinical (Variability/Accumulation)"])
 route = st.sidebar.radio("Route", ["IV", "Oral"])
+
+st.sidebar.subheader("🛡️ Data Quality Controls")
+lloq = st.sidebar.number_input("LLOQ (Lower Limit of Quantitation)", value=0.0, min_value=0.0, help="정량 하한치 이하 값(BLQ) 처리 기준")
+blq_method = st.sidebar.selectbox("BLQ Handling Method", ["M1 (Exclude)", "M2 (First BLQ 0)", "M4 (LLOQ/2)"])
+max_blq = st.sidebar.slider("Consecutive BLQ Limit", 1, 5, 2, help="연속 BLQ 발생 시 이후 데이터 Missing 처리 기준")
 
 tau = 24.0 # Default
 if eval_type == "Clinical (Variability/Accumulation)":
@@ -334,12 +451,35 @@ if mode == "NCA & Fitting":
     # Statistical Aggregation
     st.subheader("📊 PK Profile & Group Statistics")
     
-    # Plotting logic with group stats
-    groups = data['Group'].unique()
+    # Outlier Detection
+    use_outlier = st.sidebar.checkbox("Auto-detect Outliers (IQR)", value=True)
+    if use_outlier:
+        def detect_outliers_iqr(df):
+            masks = []
+            for (g, t), g_t_df in df.groupby(['Group', 'Time']):
+                if len(g_t_df) >= 3:
+                    q1 = g_t_df['Concentration'].quantile(0.25)
+                    q3 = g_t_df['Concentration'].quantile(0.75)
+                    iqr = q3 - q1
+                    mask = (g_t_df['Concentration'] < (q1 - 1.5*iqr)) | (g_t_df['Concentration'] > (q3 + 1.5*iqr))
+                    masks.append(mask)
+            if masks:
+                total_mask = pd.concat(masks)
+                df['Is_Outlier'] = total_mask.reindex(df.index, fill_value=False)
+            else:
+                df['Is_Outlier'] = False
+            return df
+        data = detect_outliers_iqr(data)
+
     # Plotly Individual Profiles
     fig = px.line(data, x='Time', y='Concentration', color='Group', line_group='Subject',
                  hover_data=['Subject', 'Dose'], markers=True, 
                  title="Individual PK Profiles (Interactive)")
+    if use_outlier and 'Is_Outlier' in data.columns:
+        outliers = data[data['Is_Outlier']]
+        fig.add_trace(go.Scatter(x=outliers['Time'], y=outliers['Concentration'], mode='markers', 
+                                 name='Potential Outlier', marker=dict(color='red', size=10, symbol='x')))
+    
     if show_log: fig.update_yaxes(type='log')
     st.plotly_chart(fig, use_container_width=True)
 
@@ -349,7 +489,9 @@ if mode == "NCA & Fitting":
     for (g, sub), sub_data in data.groupby(['Group', 'Subject']):
         d_val = sub_data['Dose'].iloc[0] if 'Dose' in sub_data.columns else 100
         sex_val = sub_data['Sex'].iloc[0] if 'Sex' in sub_data.columns else 'N/A'
-        res = calculate_single_nca(sub_data['Time'].values, sub_data['Concentration'].values, dose=d_val, route=route)
+        res = calculate_single_nca(sub_data['Time'].values, sub_data['Concentration'].values, 
+                                   dose=d_val, route=route, method='Linear-up Log-down', 
+                                   lloq=lloq, blq_method=blq_method)
         res.update({'Group': g, 'Subject': sub, 'Sex': sex_val, 'Dose': d_val})
         all_nca.append(res)
     
@@ -988,5 +1130,92 @@ elif mode == "Dose-Response & PD Modeling":
                     st.write(f"📈 **Dose-Response Hill Fit**: $ED_{{50}}$ = {popt_dr[1]:.2f} mg")
                 except: pass
 
+elif mode == "Parent-Metabolite Modeling":
+    st.subheader("🧬 Parent-Metabolite Integrated Modeling")
+    st.info("부모 약물(Parent)과 대사체(Metabolite)의 생성 및 소실을 통합적으로 분석합니다.")
+    
+    col_p, col_m = st.columns(2)
+    with col_p:
+        n_p = st.selectbox("Parent Compartments", [1, 2, 3], index=0)
+    with col_m:
+        n_m = st.selectbox("Metabolite Compartments", [1, 2], index=0)
+    
+    # Example Generation for Parent-Metabolite
+    def generate_pm_example():
+        times = [0, 0.5, 1, 2, 4, 8, 12, 24]
+        data = []
+        # True params
+        p = {'kel_p': 0.1, 'k_pm': 0.05, 'kel_m': 0.1, 'n_p': 1, 'n_m': 1}
+        y0 = [100, 0] # Dose 100
+        sol = solve_ivp(parent_metabolite_model_ode, (0, 24), y0, t_eval=times, args=(p,))
+        for i, t in enumerate(times):
+            data.append({'Time': t, 'Analyte': 'Parent', 'Concentration': round(sol.y[0][i]*np.exp(np.random.normal(0,0.05)), 2)})
+            data.append({'Time': t, 'Analyte': 'Metabolite', 'Concentration': round(sol.y[1][i]*np.exp(np.random.normal(0,0.05)), 2)})
+        return pd.DataFrame(data)
+
+    if 'pm_data' not in st.session_state:
+        st.session_state['pm_data'] = generate_pm_example()
+    
+    pm_df = st.data_editor(st.session_state['pm_data'], num_rows="dynamic", use_container_width=True)
+    st.session_state['pm_data'] = pm_df
+    
+    if not pm_df.empty:
+        fig_pm = px.line(pm_df, x='Time', y='Concentration', color='Analyte', markers=True, title="Parent & Metabolite Profiles")
+        st.plotly_chart(fig_pm, use_container_width=True)
+        
+        # Fitting Logic
+        if st.button("🚀 Run Integrated Fitting"):
+            # Prepare data
+            t_eval = sorted(pm_df['Time'].unique())
+            p_data = pm_df[pm_df['Analyte'] == 'Parent'].groupby('Time')['Concentration'].mean().reindex(t_eval, fill_value=0).values
+            m_data = pm_df[pm_df['Analyte'] == 'Metabolite'].groupby('Time')['Concentration'].mean().reindex(t_eval, fill_value=0).values
+            
+            combined_obs = np.concatenate([p_data, m_data])
+            
+            def fit_func(t, kel_p, k_pm, kel_m):
+                p_sim = {'kel_p': kel_p, 'k_pm': k_pm, 'kel_m': kel_m, 'n_p': n_p, 'n_m': n_m}
+                y0 = [100] + [0]*(n_p + n_m)
+                sol = solve_ivp(parent_metabolite_model_ode, (0, max(t_eval)), y0, t_eval=t_eval, args=(p_sim,))
+                return np.concatenate([sol.y[0], sol.y[n_p]])
+
+            try:
+                popt, _ = curve_fit(fit_func, t_eval, combined_obs, p0=[0.1, 0.05, 0.1], bounds=(0, np.inf))
+                st.success(f"Fitting Successful! kel_p: {popt[0]:.4f}, k_pm: {popt[1]:.4f}, kel_m: {popt[2]:.4f}")
+                
+                # Show Fit
+                p_final = {'kel_p': popt[0], 'k_pm': popt[1], 'kel_m': popt[2], 'n_p': n_p, 'n_m': n_m}
+                y0_final = [100] + [0]*(n_p + n_m)
+                sol_fit = solve_ivp(parent_metabolite_model_ode, (0, max(t_eval)), y0_final, t_eval=np.linspace(0, max(t_eval), 100), args=(p_final,))
+                fig_fit = go.Figure()
+                fig_fit.add_trace(go.Scatter(x=pm_df[pm_df['Analyte']=='Parent']['Time'], y=pm_df[pm_df['Analyte']=='Parent']['Concentration'], mode='markers', name='Parent Obs'))
+                fig_fit.add_trace(go.Scatter(x=sol_fit.t, y=sol_fit.y[0], mode='lines', name='Parent Fit'))
+                fig_fit.add_trace(go.Scatter(x=pm_df[pm_df['Analyte']=='Metabolite']['Time'], y=pm_df[pm_df['Analyte']=='Metabolite']['Concentration'], mode='markers', name='Metabolite Obs'))
+                fig_fit.add_trace(go.Scatter(x=sol_fit.t, y=sol_fit.y[n_p], mode='lines', name='Metabolite Fit'))
+                st.plotly_chart(fig_fit, use_container_width=True)
+            except Exception as e:
+                st.error(f"Fitting Failed: {e}")
+
 st.divider()
-st.caption("Developed by Antigravity PK Engine | Automatic Updates via GitHub")
+
+# --- Report Generation ---
+st.subheader("📋 Final Analysis Report")
+if st.button("📄 Generate Summary Report (HTML)"):
+    report_html = f"""
+    <html>
+    <head><style>body {{ font-family: sans-serif; }} table {{ border-collapse: collapse; width: 100%; }} th, td {{ border: 1px solid #ddd; padding: 8px; }}</style></head>
+    <body>
+        <h1>PK Analysis Summary Report</h1>
+        <p>Generated on: {pd.Timestamp.now()}</p>
+        <h2>Analysis Scope</h2>
+        <ul>
+            <li>Mode: {mode}</li>
+            <li>LLOQ: {lloq} (Method: {blq_method})</li>
+        </ul>
+        <h2>Results</h2>
+        <p>NCA and Compartmental Analysis results as shown in the application dashboard.</p>
+    </body>
+    </html>
+    """
+    st.download_button("📥 Download HTML Report", report_html, "pk_report.html", "text/html")
+
+st.caption("Developed by Antigravity PK Engine | Gold Standard Phase 2")
