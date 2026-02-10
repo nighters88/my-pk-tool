@@ -148,19 +148,26 @@ def run_ocr(image):
         conn.close()
         return pd.DataFrame()
 
-# --- Smart Paste Parser (Phase 4.1) ---
+# --- Smart Paste Parser (Phase 4.1/4.7) ---
 def parse_smart_paste(text):
     # Regex for finding all number patterns including decimals and negatives
     import re
-    # Find numbers: handle spaces, commas (as decimal or separator), and scientific notation
-    # Simplified for PK: extract all sequential numbers
-    nums = re.findall(r"[-+]?\d*\.\d+|\d+", text.replace(',', '.'))
+    # Extract all numbers from the text, handling commas as decimal points
+    text_clean = text.replace(',', '.')
+    # Find all float-like or integer-like groups
+    nums = re.findall(r"[-+]?\d*\.\d+|\d+", text_clean)
     nums = [float(n) for n in nums]
     
     rows = []
-    # Heuristic: assume pairs (Time, Concentration)
+    # If the user copied a 2-column table, they will come in pairs
     for i in range(0, len(nums) - 1, 2):
-        rows.append({'Time': nums[i], 'Concentration': nums[i+1], 'Group': 'Imported', 'Subject': 'P1', 'Dose': 100})
+        rows.append({
+            'Time': nums[i], 
+            'Concentration': nums[i+1], 
+            'Group': 'Group 1', 
+            'Subject': 'S1', 
+            'Dose': 100
+        })
     
     return pd.DataFrame(rows)
 
@@ -690,16 +697,32 @@ if mode == "NCA & Fitting":
             data = st.session_state['nca_example']
     elif input_method == "Photo/Image (OCR)":
         st.sidebar.markdown("""
-            <div style="background-color: #f0f7ff; border: 2px solid #3b82f6; padding: 15px; border-radius: 12px; margin-bottom: 15px;">
-                <p style="margin: 0; color: #1d4ed8; font-weight: bold; font-size: 1em;">🚀 [No-Save] 초고속 업로드 꿀팁</p>
-                <p style="margin: 10px 0 5px 0; font-size: 0.9em; color: #1e40af;"><b>방법 1. 드래그 앤 드롭 (추천)</b></p>
-                <p style="margin: 0; font-size: 0.85em; color: #3b82f6;">Shift+Win+S 캡처 후, 우측 하단 <b>알림 썸네일을 마우스로 잡아서</b> 아래 박스로 바로 끌어오세요!</p>
-                <p style="margin: 10px 0 5px 0; font-size: 0.9em; color: #1e40af;"><b>방법 2. 클릭 후 붙여넣기</b></p>
-                <p style="margin: 0; font-size: 0.85em; color: #3b82f6;">아래 박스(Browse files)를 <b>마우스로 한 번 클릭</b>한 다음 <b>Ctrl+V</b>를 누르세요.</p>
+            <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 12px; margin-bottom: 20px;">
+                <p style="margin: 0; color: #1e293b; font-weight: bold; font-size: 0.95em;">📸 캡처 화면 즉시 붙여넣기 (Ctrl+V)</p>
+                <p style="margin: 10px 0 0 0; font-size: 0.85em; color: #475569;">
+                    1. <b>Shift+Win+S</b>로 표를 캡처합니다.<br>
+                    2. 아래 <b>여기를 클릭하세요</b> 영역을 클릭합니다.<br>
+                    3. <b>Ctrl + V</b>를 누르면 즉시 사진이 업로드됩니다.
+                </p>
             </div>
+            <style>
+                /* file uploader area styling to look like a paste zone */
+                [data-testid="stFileUploaderDropzone"] {
+                    border: 2px dashed #4A90E2 !important;
+                    background-color: #f0f8ff !important;
+                    padding: 20px !important;
+                }
+                [data-testid="stFileUploaderDropzone"]::before {
+                    content: "📌 여 기 를 클 릭 하 세 요";
+                    display: block;
+                    font-weight: bold;
+                    color: #4A90E2;
+                    margin-bottom: 10px;
+                }
+            </style>
         """, unsafe_allow_html=True)
         
-        img_file = st.sidebar.file_uploader("이미지 파일 또는 캡처 썸네일을 여기에 드롭하세요", type=['png', 'jpg', 'jpeg'], label_visibility="visible")
+        img_file = st.sidebar.file_uploader("Upload Image", type=['png', 'jpg', 'jpeg'], label_visibility="collapsed")
         
         if img_file:
             img = Image.open(img_file)
@@ -721,25 +744,25 @@ if mode == "NCA & Fitting":
         data = st.session_state.get('nca_manual', generate_3x3_example(route))
     elif input_method == "Smart Paste (Text)":
         st.sidebar.markdown("""
-            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
-                <p style="margin: 0; color: #334155; font-size: 0.85em;">💡 <b>가장 빠른 [무저장] 업로드 방법:</b></p>
-                <ol style="margin-top: 5px; font-size: 0.8em; color: #475569; padding-left: 20px;">
-                    <li><b>Shift+Win+S</b>로 표 캡처</li>
-                    <li>캡처 창 우측 상단의 <b>'텍스트 작업(OCR)'</b> 아이콘 클릭 후 <b>[모든 텍스트 복사]</b></li>
-                    <li>여기에 <b>붙여넣기(Ctrl+V)</b> 후 적용</li>
+            <div style="background-color: #e3faf2; border-left: 5px solid #20c997; padding: 10px; border-radius: 4px; margin-bottom: 10px;">
+                <p style="margin: 0; color: #087f5b; font-weight: bold; font-size: 0.9em;">✨ 캡처 텍스트 추출 (가장 확실한 방법)</p>
+                <ol style="margin-top: 5px; font-size: 0.8em; color: #099268; padding-left: 20px;">
+                    <li><b>Shift+Win+S</b> 후 알림창을 클릭합니다.</li>
+                    <li>캡처 도구 창 하단의 <b>'텍스트 작업' (사각형 아이콘)</b>을 누릅니다.</li>
+                    <li><b>[모든 텍스트 복사]</b> 후 여기에 <b>Ctrl+V</b> 하세요.</li>
                 </ol>
             </div>
         """, unsafe_allow_html=True)
-        paste_text = st.sidebar.text_area("Paste Data (PDF/Excel/OCR Text)", height=150, placeholder="0  10.2\n1  25.4\n2  18.1...")
-        if st.sidebar.button("⚡ Apply Universal Smart Paste", type="primary"):
+        paste_text = st.sidebar.text_area("텍스트 데이터 붙여넣기", height=150, placeholder="0  10.2\n1  25.4\n2  18.1...")
+        if st.sidebar.button("⚡ 데이터로 변환하기", type="primary", use_container_width=True):
             if paste_text:
                 paste_df = parse_smart_paste(paste_text)
                 if not paste_df.empty:
                     st.session_state['nca_manual'] = paste_df
-                    st.sidebar.success(f"성공: {len(paste_df)}쌍의 데이터 매칭")
+                    st.sidebar.success(f"성공: {len(paste_df)}개의 데이터 포인트를 찾았습니다.")
                     st.rerun()
                 else:
-                    st.sidebar.error("데이터를 인식하지 못했습니다.")
+                    st.sidebar.error("데이터 형식을 인식하지 못했습니다.")
         
         data = st.session_state.get('nca_manual', generate_3x3_example(route))
     else:
