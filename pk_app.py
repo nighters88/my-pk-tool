@@ -149,22 +149,18 @@ def run_ocr(image):
 
 # --- Smart Paste Parser (Phase 4.1) ---
 def parse_smart_paste(text):
-    # Try to parse copied text from Excel, PDF, or Web tables
+    # Regex for finding all number patterns including decimals and negatives
+    import re
+    # Find numbers: handle spaces, commas (as decimal or separator), and scientific notation
+    # Simplified for PK: extract all sequential numbers
+    nums = re.findall(r"[-+]?\d*\.\d+|\d+", text.replace(',', '.'))
+    nums = [float(n) for n in nums]
+    
     rows = []
-    lines = text.strip().split('\n')
-    for line in lines:
-        parts = line.replace(',', '\t').replace(';', '\t').split('\t')
-        parts = [p.strip() for p in parts if p.strip()]
-        if not parts: continue
-        
-        nums = []
-        for p in parts:
-            try:
-                nums.append(float(p))
-            except: pass
-        
-        if len(nums) >= 2:
-            rows.append({'Time': nums[0], 'Concentration': nums[1], 'Group': 'Pasted', 'Subject': 'P1', 'Dose': 100})
+    # Heuristic: assume pairs (Time, Concentration)
+    for i in range(0, len(nums) - 1, 2):
+        rows.append({'Time': nums[i], 'Concentration': nums[i+1], 'Group': 'Imported', 'Subject': 'P1', 'Dose': 100})
+    
     return pd.DataFrame(rows)
 
 pk_db = PKDatabase()
@@ -732,17 +728,26 @@ if mode == "NCA & Fitting":
 
         data = st.session_state.get('nca_manual', generate_3x3_example(route))
     elif input_method == "Smart Paste (Text)":
-        st.sidebar.info("📋 **PDF/Excel 표 복사**: 텍스트를 복사해서 아래 칸에 붙여넣으세요. (Time, Conc 자동 인식)")
-        paste_text = st.sidebar.text_area("Paste Table Text Here", height=150, placeholder="0  10.2\n1  25.4\n2  18.1...")
-        if st.sidebar.button("⚡ Apply Smart Paste"):
+        st.sidebar.markdown("""
+            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
+                <p style="margin: 0; color: #334155; font-size: 0.85em;">💡 <b>가장 빠른 [무저장] 업로드 방법:</b></p>
+                <ol style="margin-top: 5px; font-size: 0.8em; color: #475569; padding-left: 20px;">
+                    <li><b>Shift+Win+S</b>로 표 캡처</li>
+                    <li>캡처 창 우측 상단의 <b>'텍스트 작업(OCR)'</b> 아이콘 클릭 후 <b>[모든 텍스트 복사]</b></li>
+                    <li>여기에 <b>붙여넣기(Ctrl+V)</b> 후 적용</li>
+                </ol>
+            </div>
+        """, unsafe_allow_html=True)
+        paste_text = st.sidebar.text_area("Paste Data (PDF/Excel/OCR Text)", height=150, placeholder="0  10.2\n1  25.4\n2  18.1...")
+        if st.sidebar.button("⚡ Apply Universal Smart Paste", type="primary"):
             if paste_text:
                 paste_df = parse_smart_paste(paste_text)
                 if not paste_df.empty:
                     st.session_state['nca_manual'] = paste_df
-                    st.sidebar.success(f"{len(paste_df)}개의 데이터 포인트를 인식했습니다.")
+                    st.sidebar.success(f"성공: {len(paste_df)}쌍의 데이터 매칭")
                     st.rerun()
                 else:
-                    st.sidebar.error("형식을 인식할 수 없습니다. (숫자 쌍이 필요합니다)")
+                    st.sidebar.error("데이터를 인식하지 못했습니다.")
         
         data = st.session_state.get('nca_manual', generate_3x3_example(route))
     else:
