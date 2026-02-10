@@ -94,24 +94,43 @@ def run_ocr(image):
     reader = get_ocr_reader()
     # image can be PIL or bytes
     results = reader.readtext(np.array(image))
-    # Simple strategy: try to find numbers and group them into rows
-    # Real OCR table parsing is complex, we provide a basic numeric extractor
-    parsed_data = []
+    
+    # Sort results by Y coordinate first, then X coordinate to group into rows
+    # bbox format: [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
+    results.sort(key=lambda x: (x[0][0][1], x[0][0][0])) 
+    
+    parsed_rows = []
+    current_row_y = -1
+    row_threshold = 20 # Vertical pixels to consider same row
+    current_row_vals = []
+    
     for (bbox, text, prob) in results:
-        # Try to parse as float
-        clean_text = text.replace(',', '.').strip()
+        clean_text = text.replace(',', '.').replace(':', '').strip()
+        # Keep only numbers and decimals
+        clean_text = "".join([c for c in clean_text if c.isdigit() or c == '.'])
+        
         try:
             val = float(clean_text)
-            parsed_data.append(val)
+            y_coord = bbox[0][1]
+            
+            if current_row_y == -1 or abs(y_coord - current_row_y) <= row_threshold:
+                current_row_vals.append(val)
+                if current_row_y == -1: current_row_y = y_coord
+            else:
+                if len(current_row_vals) >= 2:
+                    parsed_rows.append({'Time': current_row_vals[0], 'Concentration': current_row_vals[1]})
+                current_row_vals = [val]
+                current_row_y = y_coord
         except:
             pass
-    
-    # Heuristic: assume 2 columns (Time, Conc) if many numbers
-    if len(parsed_data) >= 2:
-        rows = []
-        for i in range(0, len(parsed_data) - 1, 2):
-            rows.append({'Time': parsed_data[i], 'Concentration': parsed_data[i+1]})
-        return pd.DataFrame(rows)
+            
+    # Add last row
+    if len(current_row_vals) >= 2:
+        parsed_rows.append({'Time': current_row_vals[0], 'Concentration': current_row_vals[1]})
+        
+    if parsed_rows:
+        return pd.DataFrame(parsed_rows)
+        
     return pd.DataFrame()
 
     def get_audit_trail(self, project_name):
