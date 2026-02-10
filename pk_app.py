@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import easyocr
 import streamlit.components.v1 as components
 from PIL import Image
+import base64
 
 import sqlite3
 import json
@@ -150,26 +151,47 @@ def run_ocr(image):
 
 # --- Smart Paste Parser (Phase 4.1/4.7) ---
 def parse_smart_paste(text):
-    # Regex for finding all number patterns including decimals and negatives
     import re
-    # Extract all numbers from the text, handling commas as decimal points
     text_clean = text.replace(',', '.')
-    # Find all float-like or integer-like groups
     nums = re.findall(r"[-+]?\d*\.\d+|\d+", text_clean)
     nums = [float(n) for n in nums]
-    
     rows = []
-    # If the user copied a 2-column table, they will come in pairs
     for i in range(0, len(nums) - 1, 2):
-        rows.append({
-            'Time': nums[i], 
-            'Concentration': nums[i+1], 
-            'Group': 'Group 1', 
-            'Subject': 'S1', 
-            'Dose': 100
-        })
-    
+        rows.append({'Time': nums[i], 'Concentration': nums[i+1], 'Group': 'Group 1', 'Subject': 'S1', 'Dose': 100})
     return pd.DataFrame(rows)
+
+def clipboard_image_listener():
+    # A custom HTML component to capture clipboard images without opening file dialog
+    html_code = """
+    <div id="paste-zone" style="border: 2px dashed #4A90E2; padding: 20px; border-radius: 10px; text-align: center; background-color: #f0f8ff; cursor: pointer;">
+        <p style="margin: 0; color: #1e3a8a; font-weight: bold;">[여기를 한 번 클릭] 후 [Ctrl+V]를 누르세요</p>
+        <p style="margin: 5px 0 0 0; font-size: 0.8em; color: #4A90E2;">(파일 선택 창이 뜨지 않습니다)</p>
+    </div>
+    <script>
+    const zone = document.getElementById('paste-zone');
+    zone.addEventListener('paste', async (e) => {
+        const items = e.clipboardData.items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image') !== -1) {
+                const blob = items[i].getAsFile();
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const base64 = event.target.result;
+                    // Send to Streamlit using a hidden text input in the parent
+                    const inputs = window.parent.document.querySelectorAll('input[aria-label="hidden_clipboard_data"]');
+                    if (inputs.length > 0) {
+                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                        nativeInputValueSetter.call(inputs[0], base64);
+                        inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                };
+                reader.readAsDataURL(blob);
+            }
+        }
+    });
+    </script>
+    """
+    components.html(html_code, height=100)
 
 pk_db = PKDatabase()
 
@@ -696,46 +718,45 @@ if mode == "NCA & Fitting":
                 st.session_state['nca_example'] = generate_3x3_example(route)
             data = st.session_state['nca_example']
     elif input_method == "Photo/Image (OCR)":
-        st.sidebar.markdown("""
-            <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 12px; margin-bottom: 20px;">
-                <p style="margin: 0; color: #1e293b; font-weight: bold; font-size: 0.95em;">📸 캡처 화면 즉시 붙여넣기 (Ctrl+V)</p>
-                <p style="margin: 10px 0 0 0; font-size: 0.85em; color: #475569;">
-                    1. <b>Shift+Win+S</b>로 표를 캡처합니다.<br>
-                    2. 아래 <b>여기를 클릭하세요</b> 영역을 클릭합니다.<br>
-                    3. <b>Ctrl + V</b>를 누르면 즉시 사진이 업로드됩니다.
-                </p>
-            </div>
-            <style>
-                /* file uploader area styling to look like a paste zone */
-                [data-testid="stFileUploaderDropzone"] {
-                    border: 2px dashed #4A90E2 !important;
-                    background-color: #f0f8ff !important;
-                    padding: 20px !important;
-                }
-                [data-testid="stFileUploaderDropzone"]::before {
-                    content: "📌 여 기 를 클 릭 하 세 요";
-                    display: block;
-                    font-weight: bold;
-                    color: #4A90E2;
-                    margin-bottom: 10px;
-                }
-            </style>
-        """, unsafe_allow_html=True)
+        st.sidebar.markdown("### 📸 Image Paste Hub")
+        # Hidden input to receive base64 from JS
+        paste_data = st.sidebar.text_input("hidden_clipboard_data", label_visibility="collapsed", key="hidden_clip", aria_label="hidden_clipboard_data")
         
-        img_file = st.sidebar.file_uploader("Upload Image", type=['png', 'jpg', 'jpeg'], label_visibility="collapsed")
+        # Render the custom paste listener
+        clipboard_image_listener()
         
+        # Handle the pasted image
+        img = None
+        if st.session_state.get('hidden_clip'):
+            try:
+                header, encoded = st.session_state['hidden_clip'].split(",", 1)
+                data = base64.b64decode(encoded)
+                img = Image.open(io.BytesIO(data))
+                st.sidebar.image(img, caption="클립보드에서 읽어온 이미지", use_container_width=True)
+            except Exception as e:
+                st.sidebar.error(f"이미지 처리 오류: {e}")
+        
+        # Standard uploader as fallback (separate section)
+        st.sidebar.markdown("---")
+        st.sidebar.caption("또는 파일을 직접 선택하세요:")
+        img_file = st.sidebar.file_uploader("Upload Image File", type=['png', 'jpg', 'jpeg'], label_visibility="collapsed")
         if img_file:
             img = Image.open(img_file)
-            st.sidebar.image(img, caption="입력 데이터 확인", use_container_width=True)
-            if st.sidebar.button("🔍 AI 데이터 추출 시작 (OCR)", type="primary", use_container_width=True):
-                with st.spinner("이미지 속 숫자를 분석 중..."):
-                    ocr_df = run_ocr(img)
-                    if not ocr_df.empty:
-                        st.session_state['nca_manual'] = ocr_df
-                        st.sidebar.success("추출 완료! 데이터 탭을 확인하세요.")
-                        st.rerun()
-                    else:
-                        st.sidebar.error("데이터 인식 실패. 더 선명한 이미지가 필요합니다.")
+            st.sidebar.image(img, caption="업로드된 이미지", use_container_width=True)
+
+        if img and st.sidebar.button("🔍 AI 데이터 추출 시작 (OCR)", type="primary", use_container_width=True):
+            with st.spinner("이미지 속 숫자를 분석 중..."):
+                ocr_df = run_ocr(img)
+                if not ocr_df.empty:
+                    st.session_state['nca_manual'] = ocr_df
+                    st.sidebar.success("추출 완료!")
+                    # Clear the hidden data to prevent re-processing on next rerun
+                    st.session_state['hidden_clip'] = ""
+                    st.rerun()
+                else:
+                    st.sidebar.error("데이터 인식 실패.")
+        
+        data = st.session_state.get('nca_manual', generate_3x3_example(route))
         
         # Guide to Smart Paste if OCR fails
         st.sidebar.markdown("---")
