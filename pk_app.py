@@ -207,7 +207,7 @@ def render_data_input_sidebar(state_key, example_func, example_args=(), mode_lab
     """Modular data input sidebar supporting CSV, OCR, and Smart Paste."""
     st.sidebar.subheader(f"Data Input ({mode_label})")
     input_method = st.sidebar.radio("Input Method", 
-                                    ["Manual Entry", "Upload CSV", "Photo/Image (OCR)", "Smart Paste (Text)"],
+                                    ["Manual Entry", "Upload CSV", "Photo/Image (OCR)", "Excel Copy & Paste"],
                                     key=f"input_method_{state_key}")
     
     if input_method == "Upload CSV":
@@ -246,16 +246,22 @@ def render_data_input_sidebar(state_key, example_func, example_args=(), mode_lab
                 else:
                     st.sidebar.error("데이터 인식 실패.")
                     
-    elif input_method == "Smart Paste (Text)":
-        st.sidebar.caption("Shift+Win+S 캡처 후 [모든 텍스트 복사] 하여 아래 붙여넣으세요.")
-        paste_text = st.sidebar.text_area("텍스트 데이터 붙여넣기", height=150, placeholder="0  10.2\n1  25.4...", key=f"paste_{state_key}")
-        if st.sidebar.button("⚡ 데이터로 변환하기", type="primary", use_container_width=True, key=f"paste_btn_{state_key}"):
-            if paste_text:
-                paste_df = parse_smart_paste(paste_text)
-                if not paste_df.empty:
-                    st.session_state[state_key] = paste_df
-                    st.sidebar.success(f"성공: {len(paste_df)}개의 데이터!")
+    elif input_method == "Excel Copy & Paste":
+        st.sidebar.caption("엑셀이나 스프레드시트의 셀을 복사(Ctrl+C)하여 아래에 붙여넣으세요.")
+        paste_text = st.sidebar.text_area("엑셀 데이터 붙여넣기", height=150, placeholder="Group    Subject    Dose    Time    Conc\n1    S1    10    0    0.0...", key=f"paste_{state_key}")
+        
+        if paste_text:
+            preview_df = parse_smart_paste(paste_text)
+            if not preview_df.empty:
+                st.sidebar.markdown("Checking Data Structure...")
+                st.sidebar.dataframe(preview_df.head(3), use_container_width=True)
+                
+                if st.sidebar.button("⚡ 데이터 적용하기", type="primary", use_container_width=True, key=f"paste_btn_{state_key}"):
+                    st.session_state[state_key] = preview_df
+                    st.sidebar.success(f"성공: {len(preview_df)}행 데이터 로드 완료!")
                     st.rerun()
+            else:
+                st.sidebar.warning("데이터 형식을 인식할 수 없습니다. 엑셀에서 표 전체를 복사해주세요.")
     
     else: # Manual / Example
         if st.sidebar.button("🔄 Reset to Example Data", key=f"reset_{state_key}"):
