@@ -304,13 +304,80 @@ def clipboard_image_listener_with_key(key):
 # --- Smart Paste Parser (Phase 4.1/4.7) ---
 def parse_smart_paste(text):
     import re
-    text_clean = text.replace(',', '.')
-    nums = re.findall(r"[-+]?\d*\.\d+|\d+", text_clean)
-    nums = [float(n) for n in nums]
-    rows = []
-    for i in range(0, len(nums) - 1, 2):
-        rows.append({'Time': nums[i], 'Concentration': nums[i+1], 'Group': 'Group 1', 'Subject': 'S1', 'Dose': 100})
-    return pd.DataFrame(rows)
+    import io
+    
+    # 1. Robust CSV/Table Parsing (Tab/Comma/Space auto-detection)
+    try:
+        # Check if first row looks like a header (contains letters)
+        first_line = text.strip().split('\n')[0]
+        has_header = any(c.isalpha() for c in first_line)
+        
+        # Parse using python engine for robust delimiter sniffing
+        df = pd.read_csv(io.StringIO(text), sep=None, engine='python', header=0 if has_header else None)
+        
+        # If header=None, we have Int indices 0, 1, 2...
+        # If we just have 2 columns and no header, map to Time, Conc
+        if not has_header and len(df.columns) == 2:
+            df.columns = ['Time', 'Concentration']
+        
+        # Header Normalization Map
+        HEADER_MAP = {
+            'time': 'Time', 'hr': 'Time', 'hour': 'Time', 't': 'Time',
+            'conc': 'Concentration', 'concentration': 'Concentration', 'c': 'Concentration', 'pg/ml': 'Concentration', 'ng/ml': 'Concentration',
+            'group': 'Group', 'grp': 'Group', 'dose': 'Dose', 'subject': 'Subject', 'id': 'Subject',
+            'sex': 'Sex', 'gender': 'Sex', 'effect': 'Effect'
+        }
+        
+        new_cols = {}
+        for c in df.columns:
+            c_str = str(c).lower().strip()
+            # Stop gap for complex headers like "Time (hr)" -> "Time"
+            found_key = None
+            for k in HEADER_MAP:
+                if k == c_str or (len(k)>2 and k in c_str):
+                     found_key = k
+                     break
+            
+            if found_key:
+                new_cols[c] = HEADER_MAP[found_key]
+        
+        if new_cols:
+            df = df.rename(columns=new_cols)
+
+        # Force numeric conversion for data columns
+        for c in df.columns:
+            if c in ['Time', 'Concentration', 'Dose', 'Effect', 'Free_Target', 'Complex']:
+                df[c] = pd.to_numeric(df[c], errors='coerce')
+        
+        df = df.dropna(subset=['Time', 'Concentration'], how='all')
+
+        # Add defaults if missing
+        defaults = {'Group': 'Group 1', 'Subject': 'S1', 'Dose': 100.0}
+        for c, val in defaults.items():
+            if c not in df.columns:
+                df[c] = val
+                
+        if not df.empty:
+            return df
+            
+    except Exception as e:
+        # st.toast(f"Table Parse Error: {e}") 
+        pass
+
+    # 2. Fallback to Regex (simple Time/Conc pairs)
+    try:
+        text_clean = text.replace(',', '.')
+        nums = re.findall(r"[-+]?\d*\.\d+|\d+", text_clean)
+        nums = [float(n) for n in nums]
+        
+        rows = []
+        if len(nums) > 0 and len(nums) % 2 == 0:
+            for i in range(0, len(nums) - 1, 2):
+                rows.append({'Time': nums[i], 'Concentration': nums[i+1], 'Group': 'Group 1', 'Subject': 'S1', 'Dose': 100.0})
+            return pd.DataFrame(rows)
+    except: pass
+
+    return pd.DataFrame()
 
 def clipboard_image_listener():
     # A custom HTML component to capture clipboard images without opening file dialog
