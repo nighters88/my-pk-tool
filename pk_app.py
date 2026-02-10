@@ -263,16 +263,11 @@ def render_data_input_sidebar(state_key, example_func, example_args=(), mode_lab
 
         st.sidebar.caption("엑셀이나 스프레드시트의 셀을 복사(Ctrl+C)하여 아래에 붙여넣으세요.")
         
-        # Callback for button to ensure state update before rerun
-        def apply_excel_paste_callback():
-            # Get text from session state using the text_area key
-            raw_text = st.session_state.get(f"paste_{state_key}", "")
-            if raw_text:
-                parsed_df = parse_smart_paste(raw_text)
-                if not parsed_df.empty:
-                    st.session_state[state_key] = parsed_df
-                    # Use toast for persistent feedback across rerun
-                    st.toast(f"✅ {len(parsed_df)}행 데이터가 성공적으로 적용되었습니다!", icon="⚡")
+        # Callback to apply the PREVIEWED dataframe directly to session state
+        def apply_excel_paste_callback(data_to_apply):
+            if not data_to_apply.empty:
+                st.session_state[state_key] = data_to_apply
+                st.toast(f"✅ {len(data_to_apply)}행 데이터가 성공적으로 적용되었습니다!", icon="⚡")
         
         paste_text = st.sidebar.text_area(
             "엑셀 데이터 붙여넣기 (자동 줄바꿈 끔)", 
@@ -287,13 +282,14 @@ def render_data_input_sidebar(state_key, example_func, example_args=(), mode_lab
                 st.sidebar.markdown("Checking Data Structure...")
                 st.sidebar.dataframe(preview_df.head(3), use_container_width=True)
                 
-                # Button triggers callback -> state update -> then rerun happens naturally
+                # Button passes the ALREADY PARSED preview_df to the callback
                 st.sidebar.button(
                     "⚡ 데이터 적용하기", 
                     type="primary", 
                     use_container_width=True, 
                     key=f"paste_btn_{state_key}",
-                    on_click=apply_excel_paste_callback
+                    on_click=apply_excel_paste_callback,
+                    kwargs={"data_to_apply": preview_df}
                 )
             else:
                 st.sidebar.warning("데이터 형식을 인식할 수 없습니다. 엑셀에서 표 전체를 복사해주세요.")
