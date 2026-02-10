@@ -306,16 +306,22 @@ def parse_smart_paste(text):
     import re
     import io
     
-    # 1. Robust CSV/Table Parsing (Tab/Comma/Space auto-detection)
+    # 1. Robust CSV/Table Parsing
     try:
         # Check if first row looks like a header (contains specific keywords)
         first_line = text.strip().split('\n')[0].lower()
         header_keywords = ['group', 'time', 'conc', 'dose', 'subject', 'id', 'sex']
         has_header = any(kw in first_line for kw in header_keywords)
         
+        # Delimiter Sniffing Strategy
+        if '\t' in text:
+            sep = '\t'
+        else:
+            sep = None # use python engine sniffing (usually detects commas or multiple spaces)
+
         # Parse using python engine for robust delimiter sniffing
         # If no header, header=None (pandas assigns 0,1,2...)
-        df = pd.read_csv(io.StringIO(text), sep=None, engine='python', header=0 if has_header else None)
+        df = pd.read_csv(io.StringIO(text), sep=sep, engine='python', header=0 if has_header else None)
         
         # --- Strategy A: We have headers (or think we do) ---
         if has_header:
