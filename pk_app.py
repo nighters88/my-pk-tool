@@ -723,51 +723,44 @@ if mode == "NCA & Fitting":
             data = st.session_state['nca_example']
     elif input_method == "Photo/Image (OCR)":
         st.sidebar.markdown("### 📸 Image Paste Hub")
-        # Hidden input to receive base64 from JS. Remove aria_label to fix TypeError.
-        # Streamlit sets aria-label = label when visibility is collapsed.
+        # 1. Hidden Clipboard Listener
         st.sidebar.text_input("hidden_clipboard_data", label_visibility="collapsed", key="hidden_clip")
-        
-        # Render the custom paste listener
         clipboard_image_listener()
         
-        # Handle the pasted image
-        img = None
-        if st.session_state.get('hidden_clip'):
+        img_src = None
+        # 2. File Uploader
+        img_file = st.sidebar.file_uploader("이미지 파일 선택/드롭", type=['png', 'jpg', 'jpeg'])
+        if img_file:
+            img_src = Image.open(img_file)
+            st.sidebar.image(img_src, caption="업로드된 이미지", use_container_width=True)
+            
+        # 3. Clipboard Source (only if no file)
+        if img_src is None and st.session_state.get('hidden_clip'):
             try:
                 header, encoded = st.session_state['hidden_clip'].split(",", 1)
-                data = base64.b64decode(encoded)
-                img = Image.open(io.BytesIO(data))
-                st.sidebar.image(img, caption="클립보드에서 읽어온 이미지", use_container_width=True)
-            except Exception as e:
-                st.sidebar.error(f"이미지 처리 오류: {e}")
-        
-        # Standard uploader as fallback (separate section)
-        st.sidebar.markdown("---")
-        st.sidebar.caption("또는 파일을 직접 선택하세요:")
-        img_file = st.sidebar.file_uploader("Upload Image File", type=['png', 'jpg', 'jpeg'], label_visibility="collapsed")
-        if img_file:
-            img = Image.open(img_file)
-            st.sidebar.image(img, caption="업로드된 이미지", use_container_width=True)
+                img_data = base64.b64decode(encoded)
+                img_src = Image.open(io.BytesIO(img_data))
+                st.sidebar.image(img_src, caption="클립보드 이미지", use_container_width=True)
+            except:
+                pass
 
-        if img and st.sidebar.button("🔍 AI 데이터 추출 시작 (OCR)", type="primary", use_container_width=True):
-            with st.spinner("이미지 속 숫자를 분석 중..."):
-                ocr_df = run_ocr(img)
+        # 4. OCR Trigger
+        if img_src and st.sidebar.button("🔍 AI 데이터 추출 시작 (OCR)", type="primary", use_container_width=True):
+            with st.spinner("이미지 분석 중..."):
+                ocr_df = run_ocr(img_src)
                 if not ocr_df.empty:
                     st.session_state['nca_manual'] = ocr_df
-                    st.sidebar.success("추출 완료!")
-                    # Clear the hidden data to prevent re-processing on next rerun
-                    st.session_state['hidden_clip'] = ""
+                    st.sidebar.success("데이터 추출 성공!")
                     st.rerun()
                 else:
                     st.sidebar.error("데이터 인식 실패.")
         
         data = st.session_state.get('nca_manual', generate_3x3_example(route))
-        
+
         # Guide to Smart Paste if OCR fails
         st.sidebar.markdown("---")
         st.sidebar.caption("💡 텍스트 복사가 가능한 PDF/Excel이라면 **'Smart Paste (Text)'** 메뉴가 훨씬 빠르고 정확합니다.")
-
-        data = st.session_state.get('nca_manual', generate_3x3_example(route))
+        
     elif input_method == "Smart Paste (Text)":
         st.sidebar.markdown("""
             <div style="background-color: #e3faf2; border-left: 5px solid #20c997; padding: 10px; border-radius: 4px; margin-bottom: 10px;">
