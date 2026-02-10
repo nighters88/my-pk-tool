@@ -9,6 +9,7 @@ import io
 import plotly.express as px
 import plotly.graph_objects as go
 import easyocr
+import streamlit.components.v1 as components
 from PIL import Image
 
 import sqlite3
@@ -689,42 +690,33 @@ if mode == "NCA & Fitting":
             data = st.session_state['nca_example']
     elif input_method == "Photo/Image (OCR)":
         st.sidebar.markdown("""
-            <div style="border: 2px dashed #4A90E2; padding: 15px; border-radius: 10px; text-align: center; background-color: #f0f8ff;">
-                <p style="margin: 0; color: #1e3a8a; font-weight: bold;">📋 캡처 이미지 붙여넣기 방법</p>
-                <ol style="text-align: left; font-size: 0.85em; color: #1e3a8a; margin-top: 5px; padding-left: 20px;">
-                    <li><b>Shift+Win+S</b>로 표를 캡처합니다.</li>
-                    <li>이 안내박스를 <span style="background-color: #4A90E2; color: white; padding: 2px 5px; border-radius: 3px;">마우스로 한 번 클릭</span>합니다.</li>
-                    <li><b>Ctrl+V</b>를 누르면 아래 박스에 사진이 들어갑니다.</li>
-                </ol>
+            <div style="background-color: #f0f7ff; border: 2px solid #3b82f6; padding: 15px; border-radius: 12px; margin-bottom: 15px;">
+                <p style="margin: 0; color: #1d4ed8; font-weight: bold; font-size: 1em;">🚀 [No-Save] 초고속 업로드 꿀팁</p>
+                <p style="margin: 10px 0 5px 0; font-size: 0.9em; color: #1e40af;"><b>방법 1. 드래그 앤 드롭 (추천)</b></p>
+                <p style="margin: 0; font-size: 0.85em; color: #3b82f6;">Shift+Win+S 캡처 후, 우측 하단 <b>알림 썸네일을 마우스로 잡아서</b> 아래 박스로 바로 끌어오세요!</p>
+                <p style="margin: 10px 0 5px 0; font-size: 0.9em; color: #1e40af;"><b>방법 2. 클릭 후 붙여넣기</b></p>
+                <p style="margin: 0; font-size: 0.85em; color: #3b82f6;">아래 박스(Browse files)를 <b>마우스로 한 번 클릭</b>한 다음 <b>Ctrl+V</b>를 누르세요.</p>
             </div>
         """, unsafe_allow_html=True)
         
-        st.sidebar.caption("※ 'Browse files' 버튼을 누르면 파일 창이 뜨니 누르지 마세요!")
-        img_file = st.sidebar.file_uploader("여기에 붙여넣기 (클릭 후 Ctrl+V)", type=['png', 'jpg', 'jpeg'], label_visibility="collapsed")
+        img_file = st.sidebar.file_uploader("이미지 파일 또는 캡처 썸네일을 여기에 드롭하세요", type=['png', 'jpg', 'jpeg'], label_visibility="visible")
         
         if img_file:
             img = Image.open(img_file)
-            st.sidebar.image(img, caption="입력된 이미지", use_container_width=True)
-            if st.sidebar.button("🔍 Extract Data (OCR)", type="primary"):
-                with st.spinner("이미지 분석 중..."):
+            st.sidebar.image(img, caption="입력 데이터 확인", use_container_width=True)
+            if st.sidebar.button("🔍 AI 데이터 추출 시작 (OCR)", type="primary", use_container_width=True):
+                with st.spinner("이미지 속 숫자를 분석 중..."):
                     ocr_df = run_ocr(img)
                     if not ocr_df.empty:
                         st.session_state['nca_manual'] = ocr_df
-                        st.sidebar.success("데이터 추출 성공!")
+                        st.sidebar.success("추출 완료! 데이터 탭을 확인하세요.")
                         st.rerun()
                     else:
-                        st.sidebar.error("데이터 추출 실패 (숫자를 찾을 수 없습니다)")
+                        st.sidebar.error("데이터 인식 실패. 더 선명한 이미지가 필요합니다.")
         
-        # Fallback for mobile
-        with st.sidebar.expander("📸 모바일 카메라 촬영"):
-            cam_file = st.camera_input("Take a photo of the table", label_visibility="hidden")
-            if cam_file:
-                img = Image.open(cam_file)
-                if st.button("🔍 Analyze Photo"):
-                    ocr_df = run_ocr(img)
-                    if not ocr_df.empty:
-                        st.session_state['nca_manual'] = ocr_df
-                        st.rerun()
+        # Guide to Smart Paste if OCR fails
+        st.sidebar.markdown("---")
+        st.sidebar.caption("💡 텍스트 복사가 가능한 PDF/Excel이라면 **'Smart Paste (Text)'** 메뉴가 훨씬 빠르고 정확합니다.")
 
         data = st.session_state.get('nca_manual', generate_3x3_example(route))
     elif input_method == "Smart Paste (Text)":
