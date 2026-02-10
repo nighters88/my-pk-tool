@@ -128,6 +128,26 @@ def run_ocr(image):
         conn.close()
         return pd.DataFrame()
 
+# --- Smart Paste Parser (Phase 4.1) ---
+def parse_smart_paste(text):
+    # Try to parse copied text from Excel, PDF, or Web tables
+    rows = []
+    lines = text.strip().split('\n')
+    for line in lines:
+        parts = line.replace(',', '\t').replace(';', '\t').split('\t')
+        parts = [p.strip() for p in parts if p.strip()]
+        if not parts: continue
+        
+        nums = []
+        for p in parts:
+            try:
+                nums.append(float(p))
+            except: pass
+        
+        if len(nums) >= 2:
+            rows.append({'Time': nums[0], 'Concentration': nums[1], 'Group': 'Pasted', 'Subject': 'P1', 'Dose': 100})
+    return pd.DataFrame(rows)
+
 pk_db = PKDatabase()
 
 # --- Page Config ---
@@ -640,7 +660,7 @@ if eval_type == "Clinical (Variability/Accumulation)":
 
 if mode == "NCA & Fitting":
     st.sidebar.subheader("Data Input")
-    input_method = st.sidebar.radio("Input Method", ["Manual Entry", "Upload CSV", "Photo/Image (OCR)"])
+    input_method = st.sidebar.radio("Input Method", ["Manual Entry", "Upload CSV", "Photo/Image (OCR)", "Smart Paste (Text)"])
     show_log = st.sidebar.checkbox("Log Scale", value=True)
     
     if input_method == "Upload CSV":
@@ -653,25 +673,39 @@ if mode == "NCA & Fitting":
                 st.session_state['nca_example'] = generate_3x3_example(route)
             data = st.session_state['nca_example']
     elif input_method == "Photo/Image (OCR)":
-        st.sidebar.info("📷 사진을 업로드하면 숫자를 자동으로 추출합니다.")
-        img_file = st.sidebar.file_uploader("Upload Raw Data Photo", type=['png', 'jpg', 'jpeg'])
+        st.sidebar.info("📷 **사진 복사/붙여넣기 가능**: 파일을 선택하거나, 영역 클릭 후 `Ctrl+V`를 눌러 이미지를 바로 붙여넣으세요.")
+        img_file = st.sidebar.file_uploader("Upload or Paste Image", type=['png', 'jpg', 'jpeg'])
         if img_file:
             img = Image.open(img_file)
-            st.sidebar.image(img, caption="Uploaded Image", use_container_width=True)
+            st.sidebar.image(img, caption="Target Image", use_container_width=True)
             if st.sidebar.button("🔍 Extract Data (OCR)"):
-                with st.spinner("이미지에서 데이터를 분석 중..."):
+                with st.spinner("이미지 분석 중..."):
                     ocr_df = run_ocr(img)
                     if not ocr_df.empty:
                         st.session_state['nca_manual'] = ocr_df
-                        st.sidebar.success("데이터 추출 성공! 에디터에서 그룹명 등을 수정하세요.")
+                        st.sidebar.success("데이터 추출 성공!")
                         st.rerun()
                     else:
-                        st.sidebar.error("데이터를 추출하지 못했습니다. 명확한 사진을 올려주세요.")
+                        st.sidebar.error("데이터 추출 실패 (명확한 숫자 이미지가 필요합니다)")
         
         if 'nca_manual' in st.session_state:
             data = st.session_state['nca_manual']
         else:
             data = generate_3x3_example(route)
+    elif input_method == "Smart Paste (Text)":
+        st.sidebar.info("📋 **PDF/Excel 표 복사**: 텍스트를 복사해서 아래 칸에 붙여넣으세요. (Time, Conc 자동 인식)")
+        paste_text = st.sidebar.text_area("Paste Table Text Here", height=150, placeholder="0  10.2\n1  25.4\n2  18.1...")
+        if st.sidebar.button("⚡ Apply Smart Paste"):
+            if paste_text:
+                paste_df = parse_smart_paste(paste_text)
+                if not paste_df.empty:
+                    st.session_state['nca_manual'] = paste_df
+                    st.sidebar.success(f"{len(paste_df)}개의 데이터 포인트를 인식했습니다.")
+                    st.rerun()
+                else:
+                    st.sidebar.error("형식을 인식할 수 없습니다. (숫자 쌍이 필요합니다)")
+        
+        data = st.session_state.get('nca_manual', generate_3x3_example(route))
     else:
         st.sidebar.info("3 Dose levels, N=3 per dose 전문 예시 데이터입니다.")
         load_ex = st.sidebar.button("🔄 Reset to Professional Example (3x3)")
