@@ -87,54 +87,6 @@ class PKDatabase:
         conn.close()
         return names
 
-# --- OCR Engine (Phase 4: Image Data Entry) ---
-@st.cache_resource
-def get_ocr_reader():
-    return easyocr.Reader(['en'])
-
-def run_ocr(image):
-    reader = get_ocr_reader()
-    # image can be PIL or bytes
-    results = reader.readtext(np.array(image))
-    
-    # Sort results by Y coordinate first, then X coordinate to group into rows
-    # bbox format: [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
-    results.sort(key=lambda x: (x[0][0][1], x[0][0][0])) 
-    
-    parsed_rows = []
-    current_row_y = -1
-    row_threshold = 20 # Vertical pixels to consider same row
-    current_row_vals = []
-    
-    for (bbox, text, prob) in results:
-        clean_text = text.replace(',', '.').replace(':', '').strip()
-        # Keep only numbers and decimals
-        clean_text = "".join([c for c in clean_text if c.isdigit() or c == '.'])
-        
-        try:
-            val = float(clean_text)
-            y_coord = bbox[0][1]
-            
-            if current_row_y == -1 or abs(y_coord - current_row_y) <= row_threshold:
-                current_row_vals.append(val)
-                if current_row_y == -1: current_row_y = y_coord
-            else:
-                if len(current_row_vals) >= 2:
-                    parsed_rows.append({'Time': current_row_vals[0], 'Concentration': current_row_vals[1]})
-                current_row_vals = [val]
-                current_row_y = y_coord
-        except:
-            pass
-            
-    # Add last row
-    if len(current_row_vals) >= 2:
-        parsed_rows.append({'Time': current_row_vals[0], 'Concentration': current_row_vals[1]})
-        
-    if parsed_rows:
-        return pd.DataFrame(parsed_rows)
-        
-    return pd.DataFrame()
-
     def get_audit_trail(self, project_name):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
@@ -148,6 +100,62 @@ def run_ocr(image):
             return pd.DataFrame(trails, columns=['Action', 'Timestamp', 'Details'])
         conn.close()
         return pd.DataFrame()
+
+# --- OCR Engine (Phase 4: Image Data Entry) ---
+@st.cache_resource
+def get_ocr_reader():
+    return easyocr.Reader(['en'])
+
+def run_ocr(image):
+    reader = get_ocr_reader()
+    results = reader.readtext(np.array(image))
+    if not results: return pd.DataFrame()
+    
+    # Sort results by Y coordinate first, then X coordinate to group into rows
+    def get_sort_key(x):
+        y_center = (x[0][0][1] + x[0][2][1]) / 2
+        return (round(y_center / 15) * 15, x[0][0][0])
+    results.sort(key=get_sort_key)
+    
+    rows = []
+    current_row_y = -1
+    row_threshold = 20
+    current_row_vals = []
+    
+    for (bbox, text, prob) in results:
+        y_center = (bbox[0][1] + bbox[2][1]) / 2
+        clean_text = "".join([c for c in text.replace(',', '.').strip() if c.isdigit() or c == '.' or c == '-'])
+        try:
+            val = float(clean_text)
+            if current_row_y == -1 or abs(y_center - current_row_y) <= row_threshold:
+                current_row_vals.append(val)
+                if current_row_y == -1: current_row_y = y_center
+            else:
+                rows.append(current_row_vals)
+                current_row_vals = [val]
+                current_row_y = y_center
+        except: continue
+    if current_row_vals: rows.append(current_row_vals)
+        
+    v_rows = []
+    for r in rows:
+        if len(r) >= 2: v_rows.append({'Time': r[0], 'Concentration': r[1]})
+            
+    h_rows = []
+    if len(rows) >= 2:
+        if abs(len(rows[0]) - len(rows[1])) <= 2 and len(rows[0]) > 2:
+            min_len = min(len(rows[0]), len(rows[1]))
+            for i in range(min_len):
+                h_rows.append({'Time': rows[0][i], 'Concentration': rows[1][i]})
+
+    f_rows = h_rows if len(h_rows) > len(v_rows) else v_rows
+    if f_rows:
+        df = pd.DataFrame(f_rows)
+        for col, val in [('Group','Group 1'), ('Subject','S1'), ('Dose',100.0), ('Sex','M')]:
+            df[col] = val
+        return df
+    return pd.DataFrame()
+
 
 # --- Smart Paste Parser (Phase 4.1/4.7) ---
 def parse_smart_paste(text):
@@ -823,18 +831,30 @@ if mode == "NCA & Fitting":
         use_outlier = st.sidebar.checkbox("Auto-detect Outliers (IQR)", value=True)
         if use_outlier:
             def detect_outliers_iqr(df):
+                if df.empty: return df
+                # Ensure required columns exist for grouping
+                required = ['Group', 'Time', 'Concentration']
+                for col in required:
+                    if col not in df.columns:
+                        df[col] = 0 if col == 'Time' else 'Unknown/Empty'
+                        if col == 'Concentration': df[col] = 0.0
+
                 masks = []
-                for (g, t), g_t_df in df.groupby(['Group', 'Time']):
-                    if len(g_t_df) >= 3:
-                        q1 = g_t_df['Concentration'].quantile(0.25)
-                        q3 = g_t_df['Concentration'].quantile(0.75)
-                        iqr = q3 - q1
-                        mask = (g_t_df['Concentration'] < (q1 - 1.5*iqr)) | (g_t_df['Concentration'] > (q3 + 1.5*iqr))
-                        masks.append(mask)
-                if masks:
-                    total_mask = pd.concat(masks)
-                    df['Is_Outlier'] = total_mask.reindex(df.index, fill_value=False)
-                else:
+                try:
+                    for (g, t), g_t_df in df.groupby(['Group', 'Time']):
+                        if len(g_t_df) >= 3:
+                            q1 = g_t_df['Concentration'].quantile(0.25)
+                            q3 = g_t_df['Concentration'].quantile(0.75)
+                            iqr = q3 - q1
+                            mask = (g_t_df['Concentration'] < (q1 - 1.5*iqr)) | (g_t_df['Concentration'] > (q3 + 1.5*iqr))
+                            masks.append(mask)
+                    if masks:
+                        total_mask = pd.concat(masks)
+                        df['Is_Outlier'] = total_mask.reindex(df.index, fill_value=False)
+                    else:
+                        df['Is_Outlier'] = False
+                except Exception as e:
+                    st.warning(f"Outlier detection failed (Data structure issue): {e}")
                     df['Is_Outlier'] = False
                 return df
             data = detect_outliers_iqr(data)
