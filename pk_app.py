@@ -1211,7 +1211,10 @@ if mode == "NCA & Fitting":
 
 elif mode == "TMDD Simulation":
     render_data_input_sidebar('tmdd_manual', generate_3x3_tmdd_example, (), "TMDD Obs")
-    data = st.session_state['tmdd_manual']
+    
+    st.subheader("✍️ TMDD Observation Data Editor")
+    data = st.data_editor(st.session_state['tmdd_manual'], num_rows="dynamic", use_container_width=True)
+    st.session_state['tmdd_manual'] = data
     
     st.sidebar.divider()
     st.sidebar.subheader("TMDD Model Parameters")
@@ -1268,7 +1271,10 @@ elif mode == "TMDD Simulation":
 
 elif mode == "PK/PD Correlation":
     render_data_input_sidebar('pkpd_manual', generate_3x3_example, (route,), "PK/PD Data")
-    data = st.session_state['pkpd_manual']
+    
+    st.subheader("✍️ PK/PD Study Data Editor")
+    data = st.data_editor(st.session_state['pkpd_manual'], num_rows="dynamic", use_container_width=True)
+    st.session_state['pkpd_manual'] = data
     
     st.sidebar.divider()
     st.sidebar.subheader("PK/PD Parameters")
@@ -1470,7 +1476,10 @@ elif mode == "PK/PD Correlation":
 
 elif mode == "Dose-Response & PD Modeling":
     render_data_input_sidebar('pd_manual', generate_pd_3x3_example, (), "Dose-Response & PD")
-    pd_data = st.session_state['pd_manual']
+    
+    st.subheader("🎯 Dose-Response & Advanced PD Modeling")
+    pd_data = st.data_editor(st.session_state['pd_manual'], num_rows="dynamic", use_container_width=True)
+    st.session_state['pd_manual'] = pd_data
     
     if not pd_data.empty:
         # Aggregation
@@ -1549,9 +1558,11 @@ elif mode == "Dose-Response & PD Modeling":
 
 elif mode == "Parent-Metabolite Modeling":
     render_data_input_sidebar('pm_data', generate_pm_example, (), "Parent-Metabolite")
-    pm_df = st.session_state['pm_data']
-
+    
     st.subheader("🧬 Parent-Metabolite Integrated Modeling")
+    pm_df = st.data_editor(st.session_state['pm_data'], num_rows="dynamic", use_container_width=True)
+    st.session_state['pm_data'] = pm_df
+
     col_p, col_m = st.columns(2)
     with col_p:
         n_p = st.selectbox("Parent Compartments", [1, 2, 3], index=0)
