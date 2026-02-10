@@ -177,12 +177,16 @@ def clipboard_image_listener():
                 const reader = new FileReader();
                 reader.onload = (event) => {
                     const base64 = event.target.result;
-                    // Send to Streamlit using a hidden text input in the parent
-                    const inputs = window.parent.document.querySelectorAll('input[aria-label="hidden_clipboard_data"]');
-                    if (inputs.length > 0) {
+                    // Find the hidden input by its label text or aria-label
+                    const allInputs = window.parent.document.querySelectorAll('input');
+                    const target = Array.from(allInputs).find(input => 
+                        input.getAttribute('aria-label') === 'hidden_clipboard_data' || 
+                        input.getAttribute('placeholder') === 'hidden_clipboard_data'
+                    );
+                    if (target) {
                         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                        nativeInputValueSetter.call(inputs[0], base64);
-                        inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+                        nativeInputValueSetter.call(target, base64);
+                        target.dispatchEvent(new Event('input', { bubbles: true }));
                     }
                 };
                 reader.readAsDataURL(blob);
@@ -719,8 +723,9 @@ if mode == "NCA & Fitting":
             data = st.session_state['nca_example']
     elif input_method == "Photo/Image (OCR)":
         st.sidebar.markdown("### 📸 Image Paste Hub")
-        # Hidden input to receive base64 from JS
-        paste_data = st.sidebar.text_input("hidden_clipboard_data", label_visibility="collapsed", key="hidden_clip", aria_label="hidden_clipboard_data")
+        # Hidden input to receive base64 from JS. Remove aria_label to fix TypeError.
+        # Streamlit sets aria-label = label when visibility is collapsed.
+        st.sidebar.text_input("hidden_clipboard_data", label_visibility="collapsed", key="hidden_clip")
         
         # Render the custom paste listener
         clipboard_image_listener()
