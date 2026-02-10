@@ -308,42 +308,53 @@ def parse_smart_paste(text):
     
     # 1. Robust CSV/Table Parsing (Tab/Comma/Space auto-detection)
     try:
-        # Check if first row looks like a header (contains letters)
-        first_line = text.strip().split('\n')[0]
-        has_header = any(c.isalpha() for c in first_line)
+        # Check if first row looks like a header (contains specific keywords)
+        first_line = text.strip().split('\n')[0].lower()
+        header_keywords = ['group', 'time', 'conc', 'dose', 'subject', 'id', 'sex']
+        has_header = any(kw in first_line for kw in header_keywords)
         
         # Parse using python engine for robust delimiter sniffing
+        # If no header, header=None (pandas assigns 0,1,2...)
         df = pd.read_csv(io.StringIO(text), sep=None, engine='python', header=0 if has_header else None)
         
-        # If header=None, we have Int indices 0, 1, 2...
-        # If we just have 2 columns and no header, map to Time, Conc
-        if not has_header and len(df.columns) == 2:
-            df.columns = ['Time', 'Concentration']
-        
-        # Header Normalization Map
-        HEADER_MAP = {
-            'time': 'Time', 'hr': 'Time', 'hour': 'Time', 't': 'Time',
-            'conc': 'Concentration', 'concentration': 'Concentration', 'c': 'Concentration', 'pg/ml': 'Concentration', 'ng/ml': 'Concentration',
-            'group': 'Group', 'grp': 'Group', 'dose': 'Dose', 'subject': 'Subject', 'id': 'Subject',
-            'sex': 'Sex', 'gender': 'Sex', 'effect': 'Effect'
-        }
-        
-        new_cols = {}
-        for c in df.columns:
-            c_str = str(c).lower().strip()
-            # Stop gap for complex headers like "Time (hr)" -> "Time"
-            found_key = None
-            for k in HEADER_MAP:
-                if k == c_str or (len(k)>2 and k in c_str):
-                     found_key = k
-                     break
+        # --- Strategy A: We have headers (or think we do) ---
+        if has_header:
+            # Header Normalization Map
+            HEADER_MAP = {
+                'time': 'Time', 'hr': 'Time', 'hour': 'Time', 't': 'Time',
+                'conc': 'Concentration', 'concentration': 'Concentration', 'c': 'Concentration', 'pg/ml': 'Concentration', 'ng/ml': 'Concentration',
+                'group': 'Group', 'grp': 'Group', 'dose': 'Dose', 'subject': 'Subject', 'id': 'Subject',
+                'sex': 'Sex', 'gender': 'Sex', 'effect': 'Effect'
+            }
             
-            if found_key:
-                new_cols[c] = HEADER_MAP[found_key]
-        
-        if new_cols:
-            df = df.rename(columns=new_cols)
+            new_cols = {}
+            for c in df.columns:
+                c_str = str(c).lower().strip()
+                found_key = None
+                for k in HEADER_MAP:
+                    if k == c_str or (len(k)>2 and k in c_str):
+                         found_key = k
+                         break
+                if found_key:
+                    new_cols[c] = HEADER_MAP[found_key]
+            
+            if new_cols:
+                df = df.rename(columns=new_cols)
 
+        # --- Strategy B: No headers, infer from column count ---
+        else:
+            # Common formats based on user observation
+            # 6 cols: Group, Subject, Sex, Dose, Time, Concentration
+            # 5 cols: Group, Subject, Dose, Time, Concentration
+            # 2 cols: Time, Concentration
+            
+            if len(df.columns) == 6:
+                df.columns = ['Group', 'Subject', 'Sex', 'Dose', 'Time', 'Concentration']
+            elif len(df.columns) == 5:
+                df.columns = ['Group', 'Subject', 'Dose', 'Time', 'Concentration']
+            elif len(df.columns) == 2:
+                df.columns = ['Time', 'Concentration']
+        
         # Force numeric conversion for data columns
         for c in df.columns:
             if c in ['Time', 'Concentration', 'Dose', 'Effect', 'Free_Target', 'Complex']:
@@ -352,7 +363,7 @@ def parse_smart_paste(text):
         df = df.dropna(subset=['Time', 'Concentration'], how='all')
 
         # Add defaults if missing
-        defaults = {'Group': 'Group 1', 'Subject': 'S1', 'Dose': 100.0}
+        defaults = {'Group': 'Group 1', 'Subject': 'S1', 'Dose': 100.0, 'Sex': 'M'}
         for c, val in defaults.items():
             if c not in df.columns:
                 df[c] = val
@@ -361,7 +372,6 @@ def parse_smart_paste(text):
             return df
             
     except Exception as e:
-        # st.toast(f"Table Parse Error: {e}") 
         pass
 
     # 2. Fallback to Regex (simple Time/Conc pairs)
