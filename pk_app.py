@@ -110,50 +110,86 @@ def run_ocr(image):
     reader = get_ocr_reader()
     results = reader.readtext(np.array(image))
     if not results: return pd.DataFrame()
-    
-    # Sort results by Y coordinate first, then X coordinate to group into rows
-    def get_sort_key(x):
-        y_center = (x[0][0][1] + x[0][2][1]) / 2
-        return (round(y_center / 15) * 15, x[0][0][0])
-    results.sort(key=get_sort_key)
+
+    # Canonical mapping for headers
+    HEADER_MAP = {
+        'time': 'Time', 'hr': 'Time', 'hour': 'Time', 't': 'Time',
+        'conc': 'Concentration', 'concentration': 'Concentration', 'c': 'Concentration', 'pg/ml': 'Concentration', 'ng/ml': 'Concentration',
+        'group': 'Group', 'grp': 'Group', 'dose': 'Dose', 'mg/kg': 'Dose',
+        'subject': 'Subject', 'id': 'Subject', 'animal': 'Subject', 'pat': 'Subject',
+        'sex': 'Sex', 'gender': 'Sex'
+    }
+
+    header_locs = {} # {ColumnName: X_Center}
+    data_items = []
+
+    # 1. Identify Headers
+    for (bbox, text, prob) in results:
+        clean_text_lower = text.lower().strip()
+        matched_header = None
+        for kw, col in HEADER_MAP.items():
+            if kw == clean_text_lower or (len(kw) > 2 and kw in clean_text_lower):
+                matched_header = col
+                break
+        
+        x_center = (bbox[0][0] + bbox[2][0]) / 2
+        y_center = (bbox[0][1] + bbox[2][1]) / 2
+
+        if matched_header:
+            if matched_header not in header_locs or y_center < 200: # Heuristic for top row
+                header_locs[matched_header] = x_center
+        else:
+            data_items.append({'text': text, 'x': x_center, 'y': y_center})
+
+    # 2. Group data into rows 
+    data_items.sort(key=lambda item: (round(item['y'] / 15) * 15, item['x']))
     
     rows = []
     current_row_y = -1
     row_threshold = 20
-    current_row_vals = []
+    current_row_items = []
     
-    for (bbox, text, prob) in results:
-        y_center = (bbox[0][1] + bbox[2][1]) / 2
-        clean_text = "".join([c for c in text.replace(',', '.').strip() if c.isdigit() or c == '.' or c == '-'])
-        try:
-            val = float(clean_text)
-            if current_row_y == -1 or abs(y_center - current_row_y) <= row_threshold:
-                current_row_vals.append(val)
-                if current_row_y == -1: current_row_y = y_center
-            else:
-                rows.append(current_row_vals)
-                current_row_vals = [val]
-                current_row_y = y_center
-        except: continue
-    if current_row_vals: rows.append(current_row_vals)
-        
-    v_rows = []
-    for r in rows:
-        if len(r) >= 2: v_rows.append({'Time': r[0], 'Concentration': r[1]})
-            
-    h_rows = []
-    if len(rows) >= 2:
-        if abs(len(rows[0]) - len(rows[1])) <= 2 and len(rows[0]) > 2:
-            min_len = min(len(rows[0]), len(rows[1]))
-            for i in range(min_len):
-                h_rows.append({'Time': rows[0][i], 'Concentration': rows[1][i]})
+    for item in data_items:
+        if current_row_y == -1 or abs(item['y'] - current_row_y) <= row_threshold:
+            current_row_items.append(item)
+            if current_row_y == -1: current_row_y = item['y']
+        else:
+            rows.append(current_row_items)
+            current_row_items = [item]
+            current_row_y = item['y']
+    if current_row_items: rows.append(current_row_items)
 
-    f_rows = h_rows if len(h_rows) > len(v_rows) else v_rows
-    if f_rows:
-        df = pd.DataFrame(f_rows)
-        for col, val in [('Group','Group 1'), ('Subject','S1'), ('Dose',100.0), ('Sex','M')]:
-            df[col] = val
-        return df
+    parsed_final = []
+    if header_locs:
+        for row in rows:
+            row_dict = {}
+            for item in row:
+                closest_col = min(header_locs.keys(), key=lambda h: abs(header_locs[h] - item['x']))
+                val_text = item['text'].replace(',', '.').strip()
+                if closest_col in ['Time', 'Concentration', 'Dose']:
+                    val_text = "".join([c for c in val_text if c.isdigit() or c == '.' or c == '-'])
+                    try: row_dict[closest_col] = float(val_text)
+                    except: pass
+                else:
+                    row_dict[closest_col] = val_text
+            
+            if row_dict:
+                for col, def_val in [('Time', 0.0), ('Concentration', 0.0), ('Group', 'Group 1'), ('Subject', 'S1'), ('Dose', 100.0), ('Sex', 'M')]:
+                    if col not in row_dict: row_dict[col] = def_val
+                parsed_final.append(row_dict)
+    else:
+        # Fallback for simple Time/Conc pair tables
+        for row in rows:
+            row_vals = []
+            for item in row:
+                clean = "".join([c for c in item['text'].replace(',', '.').strip() if c.isdigit() or c == '.' or c == '-'])
+                try: row_vals.append(float(clean))
+                except: continue
+            if len(row_vals) >= 2:
+                parsed_final.append({'Time': row_vals[0], 'Concentration': row_vals[1], 'Group': 'Group 1', 'Subject': 'S1', 'Dose': 100.0, 'Sex': 'M'})
+
+    if parsed_final:
+        return pd.DataFrame(parsed_final)
     return pd.DataFrame()
 
 
