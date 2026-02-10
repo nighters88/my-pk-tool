@@ -8,6 +8,8 @@ from scipy.stats import linregress
 import io
 import plotly.express as px
 import plotly.graph_objects as go
+import easyocr
+from PIL import Image
 
 import sqlite3
 import json
@@ -82,6 +84,35 @@ class PKDatabase:
         names = [r[0] for r in c.fetchall()]
         conn.close()
         return names
+
+# --- OCR Engine (Phase 4: Image Data Entry) ---
+@st.cache_resource
+def get_ocr_reader():
+    return easyocr.Reader(['en'])
+
+def run_ocr(image):
+    reader = get_ocr_reader()
+    # image can be PIL or bytes
+    results = reader.readtext(np.array(image))
+    # Simple strategy: try to find numbers and group them into rows
+    # Real OCR table parsing is complex, we provide a basic numeric extractor
+    parsed_data = []
+    for (bbox, text, prob) in results:
+        # Try to parse as float
+        clean_text = text.replace(',', '.').strip()
+        try:
+            val = float(clean_text)
+            parsed_data.append(val)
+        except:
+            pass
+    
+    # Heuristic: assume 2 columns (Time, Conc) if many numbers
+    if len(parsed_data) >= 2:
+        rows = []
+        for i in range(0, len(parsed_data) - 1, 2):
+            rows.append({'Time': parsed_data[i], 'Concentration': parsed_data[i+1]})
+        return pd.DataFrame(rows)
+    return pd.DataFrame()
 
     def get_audit_trail(self, project_name):
         conn = sqlite3.connect(self.db_path)
@@ -609,7 +640,7 @@ if eval_type == "Clinical (Variability/Accumulation)":
 
 if mode == "NCA & Fitting":
     st.sidebar.subheader("Data Input")
-    input_method = st.sidebar.radio("Input Method", ["Manual Entry", "Upload CSV"])
+    input_method = st.sidebar.radio("Input Method", ["Manual Entry", "Upload CSV", "Photo/Image (OCR)"])
     show_log = st.sidebar.checkbox("Log Scale", value=True)
     
     if input_method == "Upload CSV":
@@ -621,6 +652,26 @@ if mode == "NCA & Fitting":
             if 'nca_example' not in st.session_state:
                 st.session_state['nca_example'] = generate_3x3_example(route)
             data = st.session_state['nca_example']
+    elif input_method == "Photo/Image (OCR)":
+        st.sidebar.info("📷 사진을 업로드하면 숫자를 자동으로 추출합니다.")
+        img_file = st.sidebar.file_uploader("Upload Raw Data Photo", type=['png', 'jpg', 'jpeg'])
+        if img_file:
+            img = Image.open(img_file)
+            st.sidebar.image(img, caption="Uploaded Image", use_container_width=True)
+            if st.sidebar.button("🔍 Extract Data (OCR)"):
+                with st.spinner("이미지에서 데이터를 분석 중..."):
+                    ocr_df = run_ocr(img)
+                    if not ocr_df.empty:
+                        st.session_state['nca_manual'] = ocr_df
+                        st.sidebar.success("데이터 추출 성공! 에디터에서 그룹명 등을 수정하세요.")
+                        st.rerun()
+                    else:
+                        st.sidebar.error("데이터를 추출하지 못했습니다. 명확한 사진을 올려주세요.")
+        
+        if 'nca_manual' in st.session_state:
+            data = st.session_state['nca_manual']
+        else:
+            data = generate_3x3_example(route)
     else:
         st.sidebar.info("3 Dose levels, N=3 per dose 전문 예시 데이터입니다.")
         load_ex = st.sidebar.button("🔄 Reset to Professional Example (3x3)")
@@ -628,10 +679,15 @@ if mode == "NCA & Fitting":
         default_df = generate_3x3_example(route)
         if 'nca_manual' not in st.session_state or load_ex:
             st.session_state['nca_manual'] = default_df
-        
-        st.subheader("✍️ Advanced Data Editor (Reactive Updates)")
+
+    # --- Main Tabbed Interface (Phase 4 Mobile Optimization) ---
+    tab1, tab2, tab3 = st.tabs(["📊 Data & QC", "📈 Results & Visuals", "🧬 Advanced Analysis"])
+
+    with tab1:
+        st.subheader("✍️ Data Editor & Quality Control")
+        # Ensure 'data' is tied to session state for editing
         data = st.data_editor(
-            st.session_state['nca_manual'],
+            st.session_state.get('nca_manual', generate_3x3_example(route)),
             num_rows="dynamic",
             use_container_width=True,
             column_config={
@@ -644,314 +700,318 @@ if mode == "NCA & Fitting":
         )
         st.session_state['nca_manual'] = data
 
-    # Statistical Aggregation
-    st.subheader("📊 PK Profile & Group Statistics")
-    
-    # Outlier Detection
-    use_outlier = st.sidebar.checkbox("Auto-detect Outliers (IQR)", value=True)
-    if use_outlier:
-        def detect_outliers_iqr(df):
-            masks = []
-            for (g, t), g_t_df in df.groupby(['Group', 'Time']):
-                if len(g_t_df) >= 3:
-                    q1 = g_t_df['Concentration'].quantile(0.25)
-                    q3 = g_t_df['Concentration'].quantile(0.75)
-                    iqr = q3 - q1
-                    mask = (g_t_df['Concentration'] < (q1 - 1.5*iqr)) | (g_t_df['Concentration'] > (q3 + 1.5*iqr))
-                    masks.append(mask)
-            if masks:
-                total_mask = pd.concat(masks)
-                df['Is_Outlier'] = total_mask.reindex(df.index, fill_value=False)
+    with tab2:
+        st.subheader("📊 PK Profile & Group Statistics")
+
+    with tab2:
+        # Statistical Aggregation
+        st.subheader("📊 PK Profile & Group Statistics")
+        
+        # Outlier Detection
+        use_outlier = st.sidebar.checkbox("Auto-detect Outliers (IQR)", value=True)
+        if use_outlier:
+            def detect_outliers_iqr(df):
+                masks = []
+                for (g, t), g_t_df in df.groupby(['Group', 'Time']):
+                    if len(g_t_df) >= 3:
+                        q1 = g_t_df['Concentration'].quantile(0.25)
+                        q3 = g_t_df['Concentration'].quantile(0.75)
+                        iqr = q3 - q1
+                        mask = (g_t_df['Concentration'] < (q1 - 1.5*iqr)) | (g_t_df['Concentration'] > (q3 + 1.5*iqr))
+                        masks.append(mask)
+                if masks:
+                    total_mask = pd.concat(masks)
+                    df['Is_Outlier'] = total_mask.reindex(df.index, fill_value=False)
+                else:
+                    df['Is_Outlier'] = False
+                return df
+            data = detect_outliers_iqr(data)
+
+        # Plotly Individual Profiles
+        groups = data['Group'].unique()
+        fig = px.line(data, x='Time', y='Concentration', color='Group', line_group='Subject',
+                     hover_data=['Subject', 'Dose'], markers=True, 
+                     title="Individual PK Profiles (Interactive)")
+        if use_outlier and 'Is_Outlier' in data.columns:
+            outliers = data[data['Is_Outlier']]
+            fig.add_trace(go.Scatter(x=outliers['Time'], y=outliers['Concentration'], mode='markers', 
+                                     name='Potential Outlier', marker=dict(color='red', size=10, symbol='x')))
+        
+        if show_log: fig.update_yaxes(type='log')
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Expanded NCA Table
+        st.subheader("📈 Professional NCA Results (Grouped)")
+        all_nca = []
+        for (g, sub), sub_data in data.groupby(['Group', 'Subject']):
+            d_val = sub_data['Dose'].iloc[0] if 'Dose' in sub_data.columns else 100
+            sex_val = sub_data['Sex'].iloc[0] if 'Sex' in sub_data.columns else 'N/A'
+            res = calculate_single_nca(sub_data['Time'].values, sub_data['Concentration'].values, 
+                                       dose=d_val, route=route, method='Linear-up Log-down', 
+                                       lloq=lloq, blq_method=blq_method)
+            res.update({'Group': g, 'Subject': sub, 'Sex': sex_val, 'Dose': d_val})
+            all_nca.append(res)
+        
+        nca_df = pd.DataFrame(all_nca)
+        
+        # Result Display based on Context
+        if eval_type == "Preclinical (TK/Linearity)":
+            st.subheader("🔬 Preclinical Evaluation (Linearity & TK)")
+            # Show Dose Proportionality logic
+            d_range = sorted(data['Dose'].unique())
+            if len(d_range) >= 2:
+                st.write("**Dose Proportionality Plot & Power Model**")
+                dp_data = nca_df.groupby('Dose').agg({'AUC_last': 'mean', 'Cmax': 'mean'}).reset_index()
+                # Power Model: ln(y) = a + b * ln(dose)
+                try:
+                    log_d = np.log(nca_df['Dose'])
+                    log_auc = np.log(nca_df['AUC_last'])
+                    slope, intercept, r_val, _, _ = linregress(log_d, log_auc)
+                    st.info(f"📈 **Power Model Analysis**: $\\beta = {slope:.3f}$ ($R^2 = {r_val**2:.3f}$)")
+                    st.caption("$\beta \approx 1$ indicates dose proportionality. $\beta > 1$ (Supra-linear), $\beta < 1$ (Sub-linear)")
+                except: pass
+
+                fig_dp = go.Figure()
+                fig_dp.add_trace(go.Scatter(x=dp_data['Dose'], y=dp_data['AUC_last'], mode='lines+markers', name='AUC_last'))
+                fig_dp.add_trace(go.Scatter(x=dp_data['Dose'], y=dp_data['Cmax'], mode='lines+markers', name='Cmax', yaxis='y2'))
+                fig_dp.update_layout(title="Dose Proportionality", xaxis_title="Dose", yaxis_title="AUC_last",
+                                     yaxis2=dict(title="Cmax", overlaying='y', side='right'))
+                st.plotly_chart(fig_dp, use_container_width=True)
             else:
-                df['Is_Outlier'] = False
-            return df
-        data = detect_outliers_iqr(data)
+                st.info("Need at least 2 unique doses for dose proportionality analysis.")
+        else: # Clinical (Variability/Accumulation)
+            st.subheader("🏥 Clinical Evaluation (Variability & Steady-state)")
+            
+            # 1. Inter-subject Variability (CV%)
+            if route == 'IV': params_to_check = ['Cmax', 'AUC_last', 'Cl', 'Vz']
+            else: params_to_check = ['Cmax', 'AUC_last', 'Cl_F', 'Vz_F']
+            available_params = [p for p in params_to_check if p in nca_df.columns and not nca_df[p].isnull().all()]
 
-    # Plotly Individual Profiles
-    groups = data['Group'].unique()
-    fig = px.line(data, x='Time', y='Concentration', color='Group', line_group='Subject',
-                 hover_data=['Subject', 'Dose'], markers=True, 
-                 title="Individual PK Profiles (Interactive)")
-    if use_outlier and 'Is_Outlier' in data.columns:
-        outliers = data[data['Is_Outlier']]
-        fig.add_trace(go.Scatter(x=outliers['Time'], y=outliers['Concentration'], mode='markers', 
-                                 name='Potential Outlier', marker=dict(color='red', size=10, symbol='x')))
-    
-    if show_log: fig.update_yaxes(type='log')
-    st.plotly_chart(fig, use_container_width=True)
+            if available_params:
+                group_cv = nca_df.groupby('Group')[available_params].agg(lambda x: (np.std(x)/np.mean(x)*100) if np.mean(x)!=0 else np.nan)
+                st.write("**Inter-subject Variability (CV%)**")
+                st.dataframe(group_cv.style.format("{:.1f}%"))
 
-    # Expanded NCA Table
-    st.subheader("📈 Professional NCA Results (Grouped)")
-    all_nca = []
-    for (g, sub), sub_data in data.groupby(['Group', 'Subject']):
-        d_val = sub_data['Dose'].iloc[0] if 'Dose' in sub_data.columns else 100
-        sex_val = sub_data['Sex'].iloc[0] if 'Sex' in sub_data.columns else 'N/A'
-        res = calculate_single_nca(sub_data['Time'].values, sub_data['Concentration'].values, 
-                                   dose=d_val, route=route, method='Linear-up Log-down', 
-                                   lloq=lloq, blq_method=blq_method)
-        res.update({'Group': g, 'Subject': sub, 'Sex': sex_val, 'Dose': d_val})
-        all_nca.append(res)
-    
-    nca_df = pd.DataFrame(all_nca)
-    
-    # Result Display based on Context
-    if eval_type == "Preclinical (TK/Linearity)":
-        st.subheader("🔬 Preclinical Evaluation (Linearity & TK)")
-        # Show Dose Proportionality logic
-        d_range = sorted(data['Dose'].unique())
-        if len(d_range) >= 2:
-            st.write("**Dose Proportionality Plot & Power Model**")
-            dp_data = nca_df.groupby('Dose').agg({'AUC_last': 'mean', 'Cmax': 'mean'}).reset_index()
-            # Power Model: ln(y) = a + b * ln(dose)
+            # 2. Steady-state & Accumulation (Estimation)
+            st.write(f"**Steady-state & Accumulation Metrics (Estimated for Tau={tau}h)**")
+            acc_results = []
+            for g, g_df in nca_df.groupby('Group'):
+                lz = g_df['Lambda_z'].mean()
+                auc_inf = g_df['AUC_inf'].mean()
+                if lz > 0:
+                    rac = 1 / (1 - np.exp(-lz * tau))
+                    cavg_ss = auc_inf / tau
+                    acc_results.append({'Group': g, 'Rac (Accumulation)': rac, 'Cavg,ss (ng/mL)': cavg_ss})
+            if acc_results:
+                st.dataframe(pd.DataFrame(acc_results).set_index('Group').style.format(precision=2))
+
+            # 3. Bioequivalence-lite (Forest Plot)
+            st.write("**Geometric Mean & 90% Confidence Interval (Forest Plot)**")
+            be_results = []
+            for g, g_df in nca_df.groupby('Group'):
+                for p in ['Cmax', 'AUC_last']:
+                    vals = g_df[p].values[g_df[p] > 0]
+                    if len(vals) >= 2:
+                        log_vals = np.log(vals)
+                        mean_log = np.mean(log_vals)
+                        se_log = np.std(log_vals, ddof=1) / np.sqrt(len(vals))
+                        t_val = 1.645 
+                        ci_lower, ci_upper = np.exp(mean_log - t_val * se_log), np.exp(mean_log + t_val * se_log)
+                        geo_mean = np.exp(mean_log)
+                        be_results.append({'Group': g, 'Parameter': p, 'GeoMean': geo_mean, 'Lower': ci_lower, 'Upper': ci_upper})
+            
+            if be_results:
+                be_df = pd.DataFrame(be_results)
+                fig_forest = px.scatter(be_df, x='GeoMean', y='Group', color='Parameter', 
+                                       error_x=be_df['Upper']-be_df['GeoMean'], 
+                                       error_x_minus=be_df['GeoMean']-be_df['Lower'],
+                                       title="PK Parameter Forest Plot (90% CI)")
+                st.plotly_chart(fig_forest, use_container_width=True)
+                st.table(be_df.set_index(['Group', 'Parameter']))
+
+        # Reorder columns for better view
+        if route == 'IV':
+            cols = ['Group', 'Subject', 'Sex', 'Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 'AUC_%extrap', 't1/2', 'Cl', 'Vz', 'Vss', 'MRT_inf', 'Lambda_z', 'R2_lz']
+        else: # Oral
+            cols = ['Group', 'Subject', 'Sex', 'Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 'AUC_%extrap', 't1/2', 'Cl_F', 'Vz_F', 'Vss', 'MRT_inf', 'Lambda_z', 'R2_lz']
+        
+        # Filter columns that actually exist in nca_df
+        display_cols = [col for col in cols if col in nca_df.columns]
+        st.dataframe(nca_df[display_cols].style.format(precision=4))
+
+        # Download Results
+        csv = nca_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download NCA Results (CSV)", csv, "pk_nca_results.csv", "text/csv")
+
+    with tab3:
+
+        # --- Section: Best Compartment Model Recommendation ---
+        st.subheader("🤖 Intelligent Model Recommendation")
+        
+        selected_group_res = st.selectbox("Select Group for CA Recommendation", groups)
+        g_avg = data[data['Group'] == selected_group_res].groupby('Time')['Concentration'].mean().reset_index()
+        t_avg, c_avg = g_avg['Time'].values, g_avg['Concentration'].values
+        g_dose = data[data['Group'] == selected_group_res]['Dose'].iloc[0]
+
+        # Simplified Model Recommendation Logic (AIC based)
+        def one_comp_iv(t, c0, ke): return c0 * np.exp(-ke * t)
+        def two_comp_iv(t, A, alpha, B, beta): return A * np.exp(-alpha * t) + B * np.exp(-beta * t)
+        
+        # New Oral Models
+        def one_comp_oral(t, ka, ke, v_f, dose):
+            # Handle t=0 for oral absorption phase
+            if isinstance(t, np.ndarray):
+                t_safe = np.where(t == 0, 1e-9, t) # Replace 0 with a small number
+            else:
+                t_safe = 1e-9 if t == 0 else t
+            
+            # Avoid division by zero if ka == ke
+            if np.isclose(ka, ke):
+                return (dose * ka / v_f) * t_safe * np.exp(-ke * t_safe)
+            else:
+                return (dose * ka / (v_f * (ka - ke))) * (np.exp(-ke * t_safe) - np.exp(-ka * t_safe))
+        
+        def one_comp_oral_fit(t, ka, ke, v_f):
+            # dose is captured from outer scope
+            return one_comp_oral(t, ka, ke, v_f, g_dose)
+
+        # Nonlinear MM Fit Wrappers
+        def mm_iv_fit(t_eval, vmax, km, vd):
+            y0 = [g_dose]
+            sol = solve_ivp(pk_mm_iv_ode, (0, max(t_eval)), y0, t_eval=t_eval, args=(vmax, km, vd))
+            return sol.y[0] / vd if sol.success else np.full_like(t_eval, 1e-6)
+
+        def mm_oral_fit(t_eval, ka, vmax, km, vd):
+            y0 = [g_dose, 0]
+            sol = solve_ivp(pk_mm_oral_ode, (0, max(t_eval)), y0, t_eval=t_eval, args=(ka, vmax, km, vd))
+            return sol.y[1] / vd if sol.success else np.full_like(t_eval, 1e-6)
+        
+        st.write(f"Analyzing **{selected_group_res}** (Dose: {g_dose}) to find the best fit...")
+        
+        best_model = "None"
+        best_aic = float('inf')
+        rec_results = {}
+
+        # 1-Comp Try
+        use_wls = st.sidebar.checkbox("Use WLS (1/Y² Weighting)", value=True, help="저농도 구간 정밀도를 높이기 위해 WinNonlin 스타일 가중치 적용")
+        weights = 1.0 / (c_avg**2 + 1e-6) if use_wls else None # Add small epsilon to avoid div by zero
+
+        try:
+            if route == "IV":
+                popt1, pcov1 = curve_fit(one_comp_iv, t_avg, c_avg, p0=[c_avg[0], 0.1], bounds=(0, np.inf), sigma=weights)
+            else:
+                # Initial guess for oral: ka > ke, V/F reasonable
+                popt1, pcov1 = curve_fit(one_comp_oral_fit, t_avg, c_avg, p0=[1.0, 0.1, 10.0], bounds=([0.001, 0.001, 0.001], [np.inf, np.inf, np.inf]), sigma=weights)
+            
+            func1 = one_comp_iv if route == "IV" else one_comp_oral_fit
+            rss = np.sum((c_avg - func1(t_avg, *popt1))**2)
+            aic = 2*len(popt1) + len(t_avg) * np.log(rss/len(t_avg))
+            
+            # Calculate CV% (Standard Error / Estimate * 100)
+            perr1 = np.sqrt(np.diag(pcov1))
+            cv1 = (perr1 / popt1) * 100
+            
+            rec_results['1-Comp'] = {'aic': aic, 'popt': popt1, 'func': func1, 'cv': cv1}
+        except Exception as e: 
+            st.write(f"1-Comp Fit Error: {e}")
+
+        # 2-Comp Try
+        if len(t_avg) >= 5 and route == "IV": # 2-comp Oral is complex for simple recommendation, keep IV for now
             try:
-                log_d = np.log(nca_df['Dose'])
-                log_auc = np.log(nca_df['AUC_last'])
-                slope, intercept, r_val, _, _ = linregress(log_d, log_auc)
-                st.info(f"📈 **Power Model Analysis**: $\\beta = {slope:.3f}$ ($R^2 = {r_val**2:.3f}$)")
-                st.caption("$\beta \approx 1$ indicates dose proportionality. $\beta > 1$ (Supra-linear), $\beta < 1$ (Sub-linear)")
+                popt2, pcov2 = curve_fit(two_comp_iv, t_avg, c_avg, p0=[c_avg[0]*0.8, 1.0, c_avg[0]*0.2, 0.1], bounds=(0, np.inf), sigma=weights)
+                rss = np.sum((c_avg - two_comp_iv(t_avg, *popt2))**2)
+                aic = 2*len(popt2) + len(t_avg) * np.log(rss/len(t_avg))
+                
+                perr2 = np.sqrt(np.diag(pcov2))
+                cv2 = (perr2 / popt2) * 100
+                
+                rec_results['2-Comp'] = {'aic': aic, 'popt': popt2, 'func': two_comp_iv, 'cv': cv2}
             except: pass
 
-            fig_dp = go.Figure()
-            fig_dp.add_trace(go.Scatter(x=dp_data['Dose'], y=dp_data['AUC_last'], mode='lines+markers', name='AUC_last'))
-            fig_dp.add_trace(go.Scatter(x=dp_data['Dose'], y=dp_data['Cmax'], mode='lines+markers', name='Cmax', yaxis='y2'))
-            fig_dp.update_layout(title="Dose Proportionality", xaxis_title="Dose", yaxis_title="AUC_last",
-                                 yaxis2=dict(title="Cmax", overlaying='y', side='right'))
-            st.plotly_chart(fig_dp, use_container_width=True)
-        else:
-            st.info("Need at least 2 unique doses for dose proportionality analysis.")
-    else: # Clinical (Variability/Accumulation)
-        st.subheader("🏥 Clinical Evaluation (Variability & Steady-state)")
-        
-        # 1. Inter-subject Variability (CV%)
-        if route == 'IV': params_to_check = ['Cmax', 'AUC_last', 'Cl', 'Vz']
-        else: params_to_check = ['Cmax', 'AUC_last', 'Cl_F', 'Vz_F']
-        available_params = [p for p in params_to_check if p in nca_df.columns and not nca_df[p].isnull().all()]
-
-        if available_params:
-            group_cv = nca_df.groupby('Group')[available_params].agg(lambda x: (np.std(x)/np.mean(x)*100) if np.mean(x)!=0 else np.nan)
-            st.write("**Inter-subject Variability (CV%)**")
-            st.dataframe(group_cv.style.format("{:.1f}%"))
-
-        # 2. Steady-state & Accumulation (Estimation)
-        st.write(f"**Steady-state & Accumulation Metrics (Estimated for Tau={tau}h)**")
-        acc_results = []
-        for g, g_df in nca_df.groupby('Group'):
-            lz = g_df['Lambda_z'].mean()
-            auc_inf = g_df['AUC_inf'].mean()
-            if lz > 0:
-                rac = 1 / (1 - np.exp(-lz * tau))
-                cavg_ss = auc_inf / tau
-                acc_results.append({'Group': g, 'Rac (Accumulation)': rac, 'Cavg,ss (ng/mL)': cavg_ss})
-        if acc_results:
-            st.dataframe(pd.DataFrame(acc_results).set_index('Group').style.format(precision=2))
-
-        # 3. Bioequivalence-lite (Forest Plot)
-        st.write("**Geometric Mean & 90% Confidence Interval (Forest Plot)**")
-        be_results = []
-        for g, g_df in nca_df.groupby('Group'):
-            for p in ['Cmax', 'AUC_last']:
-                vals = g_df[p].values[g_df[p] > 0]
-                if len(vals) >= 2:
-                    log_vals = np.log(vals)
-                    mean_log = np.mean(log_vals)
-                    se_log = np.std(log_vals, ddof=1) / np.sqrt(len(vals))
-                    t_val = 1.645 
-                    ci_lower, ci_upper = np.exp(mean_log - t_val * se_log), np.exp(mean_log + t_val * se_log)
-                    geo_mean = np.exp(mean_log)
-                    be_results.append({'Group': g, 'Parameter': p, 'GeoMean': geo_mean, 'Lower': ci_lower, 'Upper': ci_upper})
-        
-        if be_results:
-            be_df = pd.DataFrame(be_results)
-            fig_forest = px.scatter(be_df, x='GeoMean', y='Group', color='Parameter', 
-                                   error_x=be_df['Upper']-be_df['GeoMean'], 
-                                   error_x_minus=be_df['GeoMean']-be_df['Lower'],
-                                   title="PK Parameter Forest Plot (90% CI)")
-            st.plotly_chart(fig_forest, use_container_width=True)
-            st.table(be_df.set_index(['Group', 'Parameter']))
-
-    # Reorder columns for better view
-    if route == 'IV':
-        cols = ['Group', 'Subject', 'Sex', 'Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 'AUC_%extrap', 't1/2', 'Cl', 'Vz', 'Vss', 'MRT_inf', 'Lambda_z', 'R2_lz']
-    else: # Oral
-        cols = ['Group', 'Subject', 'Sex', 'Cmax', 'Tmax', 'AUC_last', 'AUC_inf', 'AUC_%extrap', 't1/2', 'Cl_F', 'Vz_F', 'Vss', 'MRT_inf', 'Lambda_z', 'R2_lz']
-    
-    # Filter columns that actually exist in nca_df
-    display_cols = [col for col in cols if col in nca_df.columns]
-    st.dataframe(nca_df[display_cols].style.format(precision=4))
-
-    # Download Results
-    csv = nca_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download NCA Results (CSV)", csv, "pk_nca_results.csv", "text/csv")
-
-    st.divider()
-
-    # --- Section: Best Compartment Model Recommendation ---
-    st.subheader("🤖 Intelligent Model Recommendation")
-    
-    selected_group_res = st.selectbox("Select Group for CA Recommendation", groups)
-    g_avg = data[data['Group'] == selected_group_res].groupby('Time')['Concentration'].mean().reset_index()
-    t_avg, c_avg = g_avg['Time'].values, g_avg['Concentration'].values
-    g_dose = data[data['Group'] == selected_group_res]['Dose'].iloc[0]
-
-    # Simplified Model Recommendation Logic (AIC based)
-    def one_comp_iv(t, c0, ke): return c0 * np.exp(-ke * t)
-    def two_comp_iv(t, A, alpha, B, beta): return A * np.exp(-alpha * t) + B * np.exp(-beta * t)
-    
-    # New Oral Models
-    def one_comp_oral(t, ka, ke, v_f, dose):
-        # Handle t=0 for oral absorption phase
-        if isinstance(t, np.ndarray):
-            t_safe = np.where(t == 0, 1e-9, t) # Replace 0 with a small number
-        else:
-            t_safe = 1e-9 if t == 0 else t
-        
-        # Avoid division by zero if ka == ke
-        if np.isclose(ka, ke):
-            return (dose * ka / v_f) * t_safe * np.exp(-ke * t_safe)
-        else:
-            return (dose * ka / (v_f * (ka - ke))) * (np.exp(-ke * t_safe) - np.exp(-ka * t_safe))
-    
-    def one_comp_oral_fit(t, ka, ke, v_f):
-        # dose is captured from outer scope
-        return one_comp_oral(t, ka, ke, v_f, g_dose)
-
-    # Nonlinear MM Fit Wrappers
-    def mm_iv_fit(t_eval, vmax, km, vd):
-        y0 = [g_dose]
-        sol = solve_ivp(pk_mm_iv_ode, (0, max(t_eval)), y0, t_eval=t_eval, args=(vmax, km, vd))
-        return sol.y[0] / vd if sol.success else np.full_like(t_eval, 1e-6)
-
-    def mm_oral_fit(t_eval, ka, vmax, km, vd):
-        y0 = [g_dose, 0]
-        sol = solve_ivp(pk_mm_oral_ode, (0, max(t_eval)), y0, t_eval=t_eval, args=(ka, vmax, km, vd))
-        return sol.y[1] / vd if sol.success else np.full_like(t_eval, 1e-6)
-    
-    st.write(f"Analyzing **{selected_group_res}** (Dose: {g_dose}) to find the best fit...")
-    
-    best_model = "None"
-    best_aic = float('inf')
-    rec_results = {}
-
-    # 1-Comp Try
-    use_wls = st.sidebar.checkbox("Use WLS (1/Y² Weighting)", value=True, help="저농도 구간 정밀도를 높이기 위해 WinNonlin 스타일 가중치 적용")
-    weights = 1.0 / (c_avg**2 + 1e-6) if use_wls else None # Add small epsilon to avoid div by zero
-
-    try:
-        if route == "IV":
-            popt1, pcov1 = curve_fit(one_comp_iv, t_avg, c_avg, p0=[c_avg[0], 0.1], bounds=(0, np.inf), sigma=weights)
-        else:
-            # Initial guess for oral: ka > ke, V/F reasonable
-            popt1, pcov1 = curve_fit(one_comp_oral_fit, t_avg, c_avg, p0=[1.0, 0.1, 10.0], bounds=([0.001, 0.001, 0.001], [np.inf, np.inf, np.inf]), sigma=weights)
-        
-        func1 = one_comp_iv if route == "IV" else one_comp_oral_fit
-        rss = np.sum((c_avg - func1(t_avg, *popt1))**2)
-        aic = 2*len(popt1) + len(t_avg) * np.log(rss/len(t_avg))
-        
-        # Calculate CV% (Standard Error / Estimate * 100)
-        perr1 = np.sqrt(np.diag(pcov1))
-        cv1 = (perr1 / popt1) * 100
-        
-        rec_results['1-Comp'] = {'aic': aic, 'popt': popt1, 'func': func1, 'cv': cv1}
-    except Exception as e: 
-        st.write(f"1-Comp Fit Error: {e}")
-
-    # 2-Comp Try
-    if len(t_avg) >= 5 and route == "IV": # 2-comp Oral is complex for simple recommendation, keep IV for now
+        # MM Nonlinear Try
         try:
-            popt2, pcov2 = curve_fit(two_comp_iv, t_avg, c_avg, p0=[c_avg[0]*0.8, 1.0, c_avg[0]*0.2, 0.1], bounds=(0, np.inf), sigma=weights)
-            rss = np.sum((c_avg - two_comp_iv(t_avg, *popt2))**2)
-            aic = 2*len(popt2) + len(t_avg) * np.log(rss/len(t_avg))
-            
-            perr2 = np.sqrt(np.diag(pcov2))
-            cv2 = (perr2 / popt2) * 100
-            
-            rec_results['2-Comp'] = {'aic': aic, 'popt': popt2, 'func': two_comp_iv, 'cv': cv2}
-        except: pass
+            if route == "IV":
+                # Initial guess: Vmax ~ Dose/10, Km ~ AvgConc
+                popt3, pcov3 = curve_fit(mm_iv_fit, t_avg, c_avg, p0=[g_dose/2, np.mean(c_avg), 10.0], bounds=(0, [np.inf, np.inf, np.inf]), sigma=weights)
+                func3 = mm_iv_fit
+                p_names3 = ['Vmax', 'Km', 'Vd']
+            else:
+                popt3, pcov3 = curve_fit(mm_oral_fit, t_avg, c_avg, p0=[1.0, g_dose/2, np.mean(c_avg), 10.0], bounds=(0, [np.inf, np.inf, np.inf, np.inf]), sigma=weights)
+                func3 = mm_oral_fit
+                p_names3 = ['ka', 'Vmax', 'Km', 'Vd']
+                
+            rss = np.sum((c_avg - func3(t_avg, *popt3))**2)
+            aic = 2*len(popt3) + len(t_avg) * np.log(rss/len(t_avg))
+            perr3 = np.sqrt(np.diag(pcov3))
+            cv3 = (perr3 / popt3) * 100
+            rec_results['MM-Nonlinear'] = {'aic': aic, 'popt': popt3, 'func': func3, 'cv': cv3, 'pnames': p_names3}
+        except Exception as e:
+            # st.write(f"MM Fit Debug: {e}") # Keep quiet unless needed
+            pass
 
-    # MM Nonlinear Try
-    try:
-        if route == "IV":
-            # Initial guess: Vmax ~ Dose/10, Km ~ AvgConc
-            popt3, pcov3 = curve_fit(mm_iv_fit, t_avg, c_avg, p0=[g_dose/2, np.mean(c_avg), 10.0], bounds=(0, [np.inf, np.inf, np.inf]), sigma=weights)
-            func3 = mm_iv_fit
-            p_names3 = ['Vmax', 'Km', 'Vd']
+        if rec_results:
+            best_model = min(rec_results, key=lambda x: rec_results[x]['aic'])
+            st.success(f"✅ **Best Model Recommended: {best_model}** (Based on AIC)")
+            
+            # Diagnostic Plots
+            st.subheader("🩺 Diagnostic Plots (Selected Model)")
+            col1, col2 = st.columns(2)
+            
+            best_info = rec_results[best_model]
+            pred = best_info['func'](t_avg, *best_info['popt'])
+            resid = c_avg - pred
+            
+            # Display Parameter Confidence
+            st.write("📊 **Parameter Estimates & Reliability (WinNonlin Style)**")
+            if best_model == 'MM-Nonlinear':
+                param_names = best_info['pnames']
+            else:
+                param_names = ['C0', 'ke'] if best_model == '1-Comp' and route == 'IV' else (['ka', 'ke', 'V/F'] if best_model == '1-Comp' else ['A', 'alpha', 'B', 'beta'])
+            
+            perf_data = []
+            for name, val, cv in zip(param_names, best_info['popt'], best_info['cv']):
+                perf_data.append({'Parameter': name, 'Estimate': val, 'CV%': cv})
+            st.table(pd.DataFrame(perf_data).set_index('Parameter'))
+
+            with col1:
+                fig_diag1, ax_diag1 = plt.subplots()
+                ax_diag1.scatter(pred, c_avg, color='blue', alpha=0.6)
+                ax_diag1.plot([0, max(c_avg)], [0, max(c_avg)], 'r--')
+                ax_diag1.set_xlabel("Predicted Conc")
+                ax_diag1.set_ylabel("Observed Conc")
+                ax_diag1.set_title("Obs vs Pred")
+                st.pyplot(fig_diag1)
+
+            with col2:
+                fig_diag2, ax_diag2 = plt.subplots()
+                ax_diag2.scatter(t_avg, resid, color='red', alpha=0.6)
+                ax_diag2.axhline(0, color='black', linestyle='--')
+                ax_diag2.set_xlabel("Time (hr)")
+                ax_diag2.set_ylabel("Residual")
+                ax_diag2.set_title("Residual Plot")
+                st.pyplot(fig_diag2)
+
+            # --- Automated Clinical Interpretation ---
+            st.subheader("💡 Automated Clinical Insights")
+            
+            # Pulling some params for interpretation
+            nca_g = nca_df[nca_df['Group'] == selected_group_res]
+            avg_hl = nca_g['t1/2'].mean() # Changed to t1/2
+            avg_r2 = nca_g['R2_lz'].mean() # Changed to R2_lz
+            
+            insight_text = ""
+            if avg_r2 > 0.95: insight_text += "✅ **High reliability**: Terminal phase fitting is excellent ($R^2 > 0.95$).\n"
+            else: insight_text += "⚠️ **Review needed**: Terminal phase fitting has some noise. Consider adjusting sampling points.\n"
+            
+            if best_model == "2-Comp":
+                insight_text += "🔄 **Distribution Phase**: Significant distribution observed. Multi-compartment modeling is recommended.\n"
+            
+            if avg_hl > 24: insight_text += "⏳ **Long Half-life**: Drug remains in system for a prolonged period. Consider potential accumulation.\n"
+            else: insight_text += "⚡ **Rapid Elimination**: Drug is cleared relatively quickly.\n"
+            
+            st.info(insight_text)
         else:
-            popt3, pcov3 = curve_fit(mm_oral_fit, t_avg, c_avg, p0=[1.0, g_dose/2, np.mean(c_avg), 10.0], bounds=(0, [np.inf, np.inf, np.inf, np.inf]), sigma=weights)
-            func3 = mm_oral_fit
-            p_names3 = ['ka', 'Vmax', 'Km', 'Vd']
-            
-        rss = np.sum((c_avg - func3(t_avg, *popt3))**2)
-        aic = 2*len(popt3) + len(t_avg) * np.log(rss/len(t_avg))
-        perr3 = np.sqrt(np.diag(pcov3))
-        cv3 = (perr3 / popt3) * 100
-        rec_results['MM-Nonlinear'] = {'aic': aic, 'popt': popt3, 'func': func3, 'cv': cv3, 'pnames': p_names3}
-    except Exception as e:
-        # st.write(f"MM Fit Debug: {e}") # Keep quiet unless needed
-        pass
-
-    if rec_results:
-        best_model = min(rec_results, key=lambda x: rec_results[x]['aic'])
-        st.success(f"✅ **Best Model Recommended: {best_model}** (Based on AIC)")
-        
-        # Diagnostic Plots
-        st.subheader("🩺 Diagnostic Plots (Selected Model)")
-        col1, col2 = st.columns(2)
-        
-        best_info = rec_results[best_model]
-        pred = best_info['func'](t_avg, *best_info['popt'])
-        resid = c_avg - pred
-        
-        # Display Parameter Confidence
-        st.write("📊 **Parameter Estimates & Reliability (WinNonlin Style)**")
-        if best_model == 'MM-Nonlinear':
-            param_names = best_info['pnames']
-        else:
-            param_names = ['C0', 'ke'] if best_model == '1-Comp' and route == 'IV' else (['ka', 'ke', 'V/F'] if best_model == '1-Comp' else ['A', 'alpha', 'B', 'beta'])
-        
-        perf_data = []
-        for name, val, cv in zip(param_names, best_info['popt'], best_info['cv']):
-            perf_data.append({'Parameter': name, 'Estimate': val, 'CV%': cv})
-        st.table(pd.DataFrame(perf_data).set_index('Parameter'))
-
-        with col1:
-            fig_diag1, ax_diag1 = plt.subplots()
-            ax_diag1.scatter(pred, c_avg, color='blue', alpha=0.6)
-            ax_diag1.plot([0, max(c_avg)], [0, max(c_avg)], 'r--')
-            ax_diag1.set_xlabel("Predicted Conc")
-            ax_diag1.set_ylabel("Observed Conc")
-            ax_diag1.set_title("Obs vs Pred")
-            st.pyplot(fig_diag1)
-
-        with col2:
-            fig_diag2, ax_diag2 = plt.subplots()
-            ax_diag2.scatter(t_avg, resid, color='red', alpha=0.6)
-            ax_diag2.axhline(0, color='black', linestyle='--')
-            ax_diag2.set_xlabel("Time (hr)")
-            ax_diag2.set_ylabel("Residual")
-            ax_diag2.set_title("Residual Plot")
-            st.pyplot(fig_diag2)
-
-        # --- Automated Clinical Interpretation ---
-        st.subheader("💡 Automated Clinical Insights")
-        
-        # Pulling some params for interpretation
-        nca_g = nca_df[nca_df['Group'] == selected_group_res]
-        avg_hl = nca_g['t1/2'].mean() # Changed to t1/2
-        avg_r2 = nca_g['R2_lz'].mean() # Changed to R2_lz
-        
-        insight_text = ""
-        if avg_r2 > 0.95: insight_text += "✅ **High reliability**: Terminal phase fitting is excellent ($R^2 > 0.95$).\n"
-        else: insight_text += "⚠️ **Review needed**: Terminal phase fitting has some noise. Consider adjusting sampling points.\n"
-        
-        if best_model == "2-Comp":
-            insight_text += "🔄 **Distribution Phase**: Significant distribution observed. Multi-compartment modeling is recommended.\n"
-        
-        if avg_hl > 24: insight_text += "⏳ **Long Half-life**: Drug remains in system for a prolonged period. Consider potential accumulation.\n"
-        else: insight_text += "⚡ **Rapid Elimination**: Drug is cleared relatively quickly.\n"
-        
-        st.info(insight_text)
-    else:
-        st.warning("Could not converge on a compartment model for this group.")
+            st.warning("Could not converge on a compartment model for this group.")
 
 elif mode == "TMDD Simulation":
     st.sidebar.subheader("TMDD Parameters")
