@@ -117,8 +117,11 @@ def run_ocr(image):
         'conc': 'Concentration', 'concentration': 'Concentration', 'c': 'Concentration', 'pg/ml': 'Concentration', 'ng/ml': 'Concentration',
         'group': 'Group', 'grp': 'Group', 'dose': 'Dose', 'mg/kg': 'Dose',
         'subject': 'Subject', 'id': 'Subject', 'animal': 'Subject', 'pat': 'Subject',
-        'sex': 'Sex', 'gender': 'Sex'
+        'sex': 'Sex', 'gender': 'Sex', 'effect': 'Effect', 'pd': 'Effect', 'response': 'Effect'
     }
+
+    # Common OCR character errors in numeric contexts
+    OCR_CORRECTION = {'o': '0', 'O': '0', 'l': '1', 'I': '1', 'i': '1', 's': '5', 'S': '5', 'b': '6', 'g': '9', 'z': '2', 'Z': '2'}
 
     header_locs = {} # {ColumnName: X_Center}
     data_items = []
@@ -166,7 +169,12 @@ def run_ocr(image):
             for item in row:
                 closest_col = min(header_locs.keys(), key=lambda h: abs(header_locs[h] - item['x']))
                 val_text = item['text'].replace(',', '.').strip()
-                if closest_col in ['Time', 'Concentration', 'Dose']:
+                
+                # Apply numeric corrections for expected number columns
+                if closest_col in ['Time', 'Concentration', 'Dose', 'Effect']:
+                    # Normalize characters
+                    for err, corr in OCR_CORRECTION.items():
+                        val_text = val_text.replace(err, corr)
                     val_text = "".join([c for c in val_text if c.isdigit() or c == '.' or c == '-'])
                     try: row_dict[closest_col] = float(val_text)
                     except: pass
@@ -182,7 +190,10 @@ def run_ocr(image):
         for row in rows:
             row_vals = []
             for item in row:
-                clean = "".join([c for c in item['text'].replace(',', '.').strip() if c.isdigit() or c == '.' or c == '-'])
+                txt = item['text'].replace(',', '.').strip()
+                for err, corr in OCR_CORRECTION.items():
+                    txt = txt.replace(err, corr)
+                clean = "".join([c for c in txt if c.isdigit() or c == '.' or c == '-'])
                 try: row_vals.append(float(clean))
                 except: continue
             if len(row_vals) >= 2:
@@ -191,6 +202,103 @@ def run_ocr(image):
     if parsed_final:
         return pd.DataFrame(parsed_final)
     return pd.DataFrame()
+
+def render_data_input_sidebar(state_key, example_func, example_args=(), mode_label="Mode"):
+    """Modular data input sidebar supporting CSV, OCR, and Smart Paste."""
+    st.sidebar.subheader(f"Data Input ({mode_label})")
+    input_method = st.sidebar.radio("Input Method", 
+                                    ["Manual Entry", "Upload CSV", "Photo/Image (OCR)", "Smart Paste (Text)"],
+                                    key=f"input_method_{state_key}")
+    
+    if input_method == "Upload CSV":
+        uploaded_file = st.sidebar.file_uploader(f"Upload {mode_label} Data (CSV)", type="csv", key=f"csv_{state_key}")
+        if uploaded_file is not None:
+            st.session_state[state_key] = pd.read_csv(uploaded_file)
+            st.success("CSV Uploaded!")
+            
+    elif input_method == "Photo/Image (OCR)":
+        st.sidebar.markdown("### 📸 Image Paste Hub")
+        st.sidebar.text_input("hidden_clipboard_data", label_visibility="collapsed", key=f"hidden_clip_{state_key}")
+        clipboard_image_listener_with_key(f"hidden_clip_{state_key}")
+        
+        img_src = None
+        img_file = st.sidebar.file_uploader("이미지 파일 선택/드롭", type=['png', 'jpg', 'jpeg'], key=f"img_{state_key}")
+        if img_file:
+            img_src = Image.open(img_file)
+            st.sidebar.image(img_src, caption="업로드된 이미지", use_container_width=True)
+            
+        clip_data = st.session_state.get(f"hidden_clip_{state_key}")
+        if img_src is None and clip_data:
+            try:
+                header, encoded = clip_data.split(",", 1)
+                img_data = base64.b64decode(encoded)
+                img_src = Image.open(io.BytesIO(img_data))
+                st.sidebar.image(img_src, caption="클립보드 이미지", use_container_width=True)
+            except: pass
+
+        if img_src and st.sidebar.button("🔍 AI 데이터 추출 시작 (OCR)", type="primary", use_container_width=True, key=f"ocr_btn_{state_key}"):
+            with st.spinner("이미지 분석 중..."):
+                ocr_df = run_ocr(img_src)
+                if not ocr_df.empty:
+                    st.session_state[state_key] = ocr_df
+                    st.sidebar.success("데이터 추출 성공!")
+                    st.rerun()
+                else:
+                    st.sidebar.error("데이터 인식 실패.")
+                    
+    elif input_method == "Smart Paste (Text)":
+        st.sidebar.caption("Shift+Win+S 캡처 후 [모든 텍스트 복사] 하여 아래 붙여넣으세요.")
+        paste_text = st.sidebar.text_area("텍스트 데이터 붙여넣기", height=150, placeholder="0  10.2\n1  25.4...", key=f"paste_{state_key}")
+        if st.sidebar.button("⚡ 데이터로 변환하기", type="primary", use_container_width=True, key=f"paste_btn_{state_key}"):
+            if paste_text:
+                paste_df = parse_smart_paste(paste_text)
+                if not paste_df.empty:
+                    st.session_state[state_key] = paste_df
+                    st.sidebar.success(f"성공: {len(paste_df)}개의 데이터!")
+                    st.rerun()
+    
+    else: # Manual / Example
+        if st.sidebar.button("🔄 Reset to Example Data", key=f"reset_{state_key}"):
+            st.session_state[state_key] = example_func(*example_args)
+            st.rerun()
+
+    if state_key not in st.session_state:
+        st.session_state[state_key] = example_func(*example_args)
+
+def clipboard_image_listener_with_key(key):
+    """Custom HTML component to capture clipboard images and send to a specific state key."""
+    html_code = f"""
+    <div id="paste-zone-{key}" style="border: 2px dashed #4A90E2; padding: 20px; border-radius: 10px; text-align: center; background-color: #f0f8ff; cursor: pointer;">
+        <p style="margin: 0; color: #1e3a8a; font-weight: bold;">[클릭 후 붙여넣기]</p>
+    </div>
+    <script>
+    const zone = document.getElementById('paste-zone-{key}');
+    zone.addEventListener('paste', async (e) => {{
+        const items = e.clipboardData.items;
+        for (let i = 0; i < items.length; i++) {{
+            if (items[i].type.indexOf('image') !== -1) {{
+                const blob = items[i].getAsFile();
+                const reader = new FileReader();
+                reader.onload = (event) => {{
+                    const base64 = event.target.result;
+                    const allInputs = window.parent.document.querySelectorAll('input');
+                    const target = Array.from(allInputs).find(input => 
+                        input.getAttribute('aria-label') === '{key}' || 
+                        input.getAttribute('placeholder') === '{key}'
+                    );
+                    if (target) {{
+                        target.value = base64;
+                        target.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        target.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                }};
+                reader.readAsDataURL(blob);
+            }}
+        }}
+    }});
+    </script>
+    """
+    components.html(html_code, height=90)
 
 
 # --- Smart Paste Parser (Phase 4.1/4.7) ---
@@ -752,89 +860,9 @@ if eval_type == "Clinical (Variability/Accumulation)":
     tau = st.sidebar.number_input("Dosing Interval (Tau, hr)", value=24.0, help="축적성(Rac) 및 Steady-state 계산을 위한 투여 간격")
 
 if mode == "NCA & Fitting":
-    st.sidebar.subheader("Data Input")
-    input_method = st.sidebar.radio("Input Method", ["Manual Entry", "Upload CSV", "Photo/Image (OCR)", "Smart Paste (Text)"])
+    render_data_input_sidebar('nca_manual', generate_3x3_example, (route,), "NCA & Fitting")
+    data = st.session_state['nca_manual']
     show_log = st.sidebar.checkbox("Log Scale", value=True)
-    
-    if input_method == "Upload CSV":
-        uploaded_file = st.sidebar.file_uploader("Upload PK Data (CSV)", type="csv")
-        if uploaded_file is not None:
-            data = pd.read_csv(uploaded_file)
-        else:
-            st.info("Using default sample data.")
-            if 'nca_example' not in st.session_state:
-                st.session_state['nca_example'] = generate_3x3_example(route)
-            data = st.session_state['nca_example']
-    elif input_method == "Photo/Image (OCR)":
-        st.sidebar.markdown("### 📸 Image Paste Hub")
-        # 1. Hidden Clipboard Listener
-        st.sidebar.text_input("hidden_clipboard_data", label_visibility="collapsed", key="hidden_clip")
-        clipboard_image_listener()
-        
-        img_src = None
-        # 2. File Uploader
-        img_file = st.sidebar.file_uploader("이미지 파일 선택/드롭", type=['png', 'jpg', 'jpeg'])
-        if img_file:
-            img_src = Image.open(img_file)
-            st.sidebar.image(img_src, caption="업로드된 이미지", use_container_width=True)
-            
-        # 3. Clipboard Source (only if no file)
-        if img_src is None and st.session_state.get('hidden_clip'):
-            try:
-                header, encoded = st.session_state['hidden_clip'].split(",", 1)
-                img_data = base64.b64decode(encoded)
-                img_src = Image.open(io.BytesIO(img_data))
-                st.sidebar.image(img_src, caption="클립보드 이미지", use_container_width=True)
-            except:
-                pass
-
-        # 4. OCR Trigger
-        if img_src and st.sidebar.button("🔍 AI 데이터 추출 시작 (OCR)", type="primary", use_container_width=True):
-            with st.spinner("이미지 분석 중..."):
-                ocr_df = run_ocr(img_src)
-                if not ocr_df.empty:
-                    st.session_state['nca_manual'] = ocr_df
-                    st.sidebar.success("데이터 추출 성공!")
-                    st.rerun()
-                else:
-                    st.sidebar.error("데이터 인식 실패.")
-        
-        data = st.session_state.get('nca_manual', generate_3x3_example(route))
-
-        # Guide to Smart Paste if OCR fails
-        st.sidebar.markdown("---")
-        st.sidebar.caption("💡 텍스트 복사가 가능한 PDF/Excel이라면 **'Smart Paste (Text)'** 메뉴가 훨씬 빠르고 정확합니다.")
-        
-    elif input_method == "Smart Paste (Text)":
-        st.sidebar.markdown("""
-            <div style="background-color: #e3faf2; border-left: 5px solid #20c997; padding: 10px; border-radius: 4px; margin-bottom: 10px;">
-                <p style="margin: 0; color: #087f5b; font-weight: bold; font-size: 0.9em;">✨ 캡처 텍스트 추출 (가장 확실한 방법)</p>
-                <ol style="margin-top: 5px; font-size: 0.8em; color: #099268; padding-left: 20px;">
-                    <li><b>Shift+Win+S</b> 후 알림창을 클릭합니다.</li>
-                    <li>캡처 도구 창 하단의 <b>'텍스트 작업' (사각형 아이콘)</b>을 누릅니다.</li>
-                    <li><b>[모든 텍스트 복사]</b> 후 여기에 <b>Ctrl+V</b> 하세요.</li>
-                </ol>
-            </div>
-        """, unsafe_allow_html=True)
-        paste_text = st.sidebar.text_area("텍스트 데이터 붙여넣기", height=150, placeholder="0  10.2\n1  25.4\n2  18.1...")
-        if st.sidebar.button("⚡ 데이터로 변환하기", type="primary", use_container_width=True):
-            if paste_text:
-                paste_df = parse_smart_paste(paste_text)
-                if not paste_df.empty:
-                    st.session_state['nca_manual'] = paste_df
-                    st.sidebar.success(f"성공: {len(paste_df)}개의 데이터 포인트를 찾았습니다.")
-                    st.rerun()
-                else:
-                    st.sidebar.error("데이터 형식을 인식하지 못했습니다.")
-        
-        data = st.session_state.get('nca_manual', generate_3x3_example(route))
-    else:
-        st.sidebar.info("3 Dose levels, N=3 per dose 전문 예시 데이터입니다.")
-        load_ex = st.sidebar.button("🔄 Reset to Professional Example (3x3)")
-        
-        default_df = generate_3x3_example(route)
-        if 'nca_manual' not in st.session_state or load_ex:
-            st.session_state['nca_manual'] = default_df
 
     # --- Main Tabbed Interface (Phase 4 Mobile Optimization) ---
     tab1, tab2, tab3 = st.tabs(["📊 Data & QC", "📈 Results & Visuals", "🧬 Advanced Analysis"])
@@ -1182,7 +1210,11 @@ if mode == "NCA & Fitting":
             st.warning("Could not converge on a compartment model for this group.")
 
 elif mode == "TMDD Simulation":
-    st.sidebar.subheader("TMDD Parameters")
+    render_data_input_sidebar('tmdd_manual', generate_3x3_tmdd_example, (), "TMDD Obs")
+    data = st.session_state['tmdd_manual']
+    
+    st.sidebar.divider()
+    st.sidebar.subheader("TMDD Model Parameters")
     params = {
         'kel': st.sidebar.slider("Elimination (kel)", 0.001, 0.5, 0.02),
         'kon': st.sidebar.slider("On-rate (kon)", 0.01, 2.0, 0.1),
@@ -1192,20 +1224,6 @@ elif mode == "TMDD Simulation":
         'kdeg': st.sidebar.slider("Target Deg (kdeg)", 0.01, 0.5, 0.1)
     }
     t_end = st.sidebar.number_input("End Time (hr)", value=168)
-
-    st.subheader("✍️ TMDD Observation Data Editor (3x3 Professional Template)")
-    if 'tmdd_manual' not in st.session_state:
-        st.session_state['tmdd_manual'] = generate_3x3_tmdd_example()
-    
-    if st.sidebar.button("🔄 Reset TMDD Example"):
-        st.session_state['tmdd_manual'] = generate_3x3_tmdd_example()
-        
-    data = st.data_editor(
-        st.session_state['tmdd_manual'],
-        num_rows="dynamic",
-        use_container_width=True
-    )
-    st.session_state['tmdd_manual'] = data
 
     # Simulation logic using parameters and THE FIRST dose from the table as a reference, 
     # but the plot will show ALL data points from the table.
@@ -1249,7 +1267,11 @@ elif mode == "TMDD Simulation":
     st.pyplot(fig)
 
 elif mode == "PK/PD Correlation":
-    st.sidebar.subheader("PK Parameters")
+    render_data_input_sidebar('pkpd_manual', generate_3x3_example, (route,), "PK/PD Data")
+    data = st.session_state['pkpd_manual']
+    
+    st.sidebar.divider()
+    st.sidebar.subheader("PK/PD Parameters")
     vd = st.sidebar.number_input("Volume (Vd, L)", value=10.0)
     cl = st.sidebar.number_input("Clearance (Cl, L/hr)", value=1.0)
     
@@ -1261,13 +1283,6 @@ elif mode == "PK/PD Correlation":
     
     t_end = st.sidebar.number_input("Simulation Time (hr)", value=48)
     dose_norm = st.sidebar.checkbox("Dose-Normalized Scale (C/Dose, E/Dose)", value=False)
-
-    st.subheader("✍️ PK/PD Study Data Editor (3x3 Professional Template)")
-    if 'pkpd_manual' not in st.session_state or st.sidebar.button("🔄 Reset PK/PD Example"):
-        st.session_state['pkpd_manual'] = generate_3x3_example(route)
-        
-    data = st.data_editor(st.session_state['pkpd_manual'], num_rows="dynamic", use_container_width=True)
-    st.session_state['pkpd_manual'] = data
 
     # Use unique doses from table to drive simulation lines
     doses = sorted(data['Dose'].unique())
@@ -1454,31 +1469,8 @@ elif mode == "PK/PD Correlation":
     st.success(f"✅ Simulation Complete for N={n_subj_actual} subjects with IIV (Cl CV {cv_cl}%, V CV {cv_v}%).")
 
 elif mode == "Dose-Response & PD Modeling":
-    st.subheader("🎯 Dose-Response & Advanced PD Modeling")
-    st.info("다양한 PD 모델을 비교하고 용량-반응(Dose-Response) 관계를 Hill equation으로 분석합니다.")
-    
-    # Example Data Generation (Direct PD)
-    def generate_pd_3x3_example():
-        doses = [10, 30, 100]
-        times = [0, 0.5, 1, 2, 4, 8, 12, 24]
-        data = []
-        for i, d in enumerate(doses):
-            grp = f"{d} mg"
-            for s in range(3):
-                sub = f"S{i*3+s+1}"
-                v_i, cl_i = 10.0, 1.0
-                emax_i, ec50_i = 100 * np.exp(np.random.normal(0, 0.05)), 20 * np.exp(np.random.normal(0, 0.05))
-                for t in times:
-                    cp = (d/v_i) * np.exp(-(cl_i/v_i)*t)
-                    eff = (emax_i * cp) / (ec50_i + cp) * np.exp(np.random.normal(0, 0.02))
-                    data.append({'Group': grp, 'Subject': sub, 'Dose': d, 'Time': t, 'Concentration': round(cp, 3), 'Effect': round(eff, 3)})
-        return pd.DataFrame(data)
-
-    if 'pd_manual' not in st.session_state or st.sidebar.button("🔄 Reset PD Example"):
-        st.session_state['pd_manual'] = generate_pd_3x3_example()
-    
-    pd_data = st.data_editor(st.session_state['pd_manual'], use_container_width=True)
-    st.session_state['pd_manual'] = pd_data
+    render_data_input_sidebar('pd_manual', generate_pd_3x3_example, (), "Dose-Response & PD")
+    pd_data = st.session_state['pd_manual']
     
     if not pd_data.empty:
         # Aggregation
@@ -1556,33 +1548,15 @@ elif mode == "Dose-Response & PD Modeling":
                 except: pass
 
 elif mode == "Parent-Metabolite Modeling":
+    render_data_input_sidebar('pm_data', generate_pm_example, (), "Parent-Metabolite")
+    pm_df = st.session_state['pm_data']
+
     st.subheader("🧬 Parent-Metabolite Integrated Modeling")
-    st.info("부모 약물(Parent)과 대사체(Metabolite)의 생성 및 소실을 통합적으로 분석합니다.")
-    
     col_p, col_m = st.columns(2)
     with col_p:
         n_p = st.selectbox("Parent Compartments", [1, 2, 3], index=0)
     with col_m:
         n_m = st.selectbox("Metabolite Compartments", [1, 2], index=0)
-    
-    # Example Generation for Parent-Metabolite
-    def generate_pm_example():
-        times = [0, 0.5, 1, 2, 4, 8, 12, 24]
-        data = []
-        # True params
-        p = {'kel_p': 0.1, 'k_pm': 0.05, 'kel_m': 0.1, 'n_p': 1, 'n_m': 1}
-        y0 = [100, 0] # Dose 100
-        sol = solve_ivp(parent_metabolite_model_ode, (0, 24), y0, t_eval=times, args=(p,))
-        for i, t in enumerate(times):
-            data.append({'Time': t, 'Analyte': 'Parent', 'Concentration': round(sol.y[0][i]*np.exp(np.random.normal(0,0.05)), 2)})
-            data.append({'Time': t, 'Analyte': 'Metabolite', 'Concentration': round(sol.y[1][i]*np.exp(np.random.normal(0,0.05)), 2)})
-        return pd.DataFrame(data)
-
-    if 'pm_data' not in st.session_state:
-        st.session_state['pm_data'] = generate_pm_example()
-    
-    pm_df = st.data_editor(st.session_state['pm_data'], num_rows="dynamic", use_container_width=True)
-    st.session_state['pm_data'] = pm_df
     
     if not pm_df.empty:
         fig_pm = px.line(pm_df, x='Time', y='Concentration', color='Analyte', markers=True, title="Parent & Metabolite Profiles")
