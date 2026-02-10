@@ -247,8 +247,27 @@ def render_data_input_sidebar(state_key, example_func, example_args=(), mode_lab
                     st.sidebar.error("데이터 인식 실패.")
                     
     elif input_method == "Excel Copy & Paste":
+        # CSS Injection for Spreadsheet-like View
+        st.markdown("""
+            <style>
+            .stTextArea textarea {
+                font-family: "Courier New", monospace !important;
+                font-size: 12px !important;
+                white-space: pre !important; 
+                overflow-x: auto !important;
+                background-color: #f8f9fa !important;
+                color: #333333 !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
         st.sidebar.caption("엑셀이나 스프레드시트의 셀을 복사(Ctrl+C)하여 아래에 붙여넣으세요.")
-        paste_text = st.sidebar.text_area("엑셀 데이터 붙여넣기", height=150, placeholder="Group    Subject    Dose    Time    Conc\n1    S1    10    0    0.0...", key=f"paste_{state_key}")
+        paste_text = st.sidebar.text_area(
+            "엑셀 데이터 붙여넣기 (자동 줄바꿈 끔)", 
+            height=200, 
+            placeholder="걱정하지 마세요! 줄바꿈 되어 보여도 실제 데이터는 안전합니다.\n여기에 그대로 붙여넣기(Ctrl+V) 하세요.\n\nGroup    Subject    Dose    Time    Conc\n1        S1         10      0       0.0...", 
+            key=f"paste_{state_key}"
+        )
         
         if paste_text:
             preview_df = parse_smart_paste(paste_text)
