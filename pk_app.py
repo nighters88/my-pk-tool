@@ -692,11 +692,15 @@ if mode == "NCA & Fitting":
                 st.session_state['nca_example'] = generate_3x3_example(route)
             data = st.session_state['nca_example']
     elif input_method == "Photo/Image (OCR)":
-        st.sidebar.info("📷 **사진 복사/붙여넣기 가능**: 파일을 선택하거나, 영역 클릭 후 `Ctrl+V`를 눌러 이미지를 바로 붙여넣으세요.")
-        img_file = st.sidebar.file_uploader("Upload or Paste Image", type=['png', 'jpg', 'jpeg'])
+        st.sidebar.markdown("""
+            <div style="border: 2px dashed #4A90E2; padding: 10px; border-radius: 8px; text-align: center; background-color: #f0f8ff; margin-bottom: 10px;">
+                <span style="font-size: 0.9em; color: #1e3a8a;">캡처후 아래 <b>Browse files</b> 클릭 후<br><b>Ctrl + V</b>를 누르면 바로 인식됩니다.</span>
+            </div>
+        """, unsafe_allow_html=True)
+        img_file = st.sidebar.file_uploader("Upload or Paste Image", type=['png', 'jpg', 'jpeg'], help="캡처 도구로 찍은 이미지를 바로 붙여넣을 수 있습니다.")
         if img_file:
             img = Image.open(img_file)
-            st.sidebar.image(img, caption="Target Image", use_container_width=True)
+            st.sidebar.image(img, caption="입력된 이미지", use_container_width=True)
             if st.sidebar.button("🔍 Extract Data (OCR)"):
                 with st.spinner("이미지 분석 중..."):
                     ocr_df = run_ocr(img)
@@ -705,8 +709,19 @@ if mode == "NCA & Fitting":
                         st.sidebar.success("데이터 추출 성공!")
                         st.rerun()
                     else:
-                        st.sidebar.error("데이터 추출 실패 (명확한 숫자 이미지가 필요합니다)")
+                        st.sidebar.error("데이터 추출 실패 (숫자를 찾을 수 없습니다)")
         
+        # Fallback for mobile: Camera
+        if st.sidebar.checkbox("📸 모바일 카메라 사용"):
+            cam_file = st.camera_input("Take a photo of the table")
+            if cam_file:
+                img = Image.open(cam_file)
+                if st.button("🔍 Analyze Photo"):
+                    ocr_df = run_ocr(img)
+                    if not ocr_df.empty:
+                        st.session_state['nca_manual'] = ocr_df
+                        st.rerun()
+
         if 'nca_manual' in st.session_state:
             data = st.session_state['nca_manual']
         else:
